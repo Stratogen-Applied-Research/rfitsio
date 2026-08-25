@@ -161,9 +161,14 @@ impl FitsFile {
             .ok_or_else(|| crate::FitsError::new(crate::status::KEY_NO_EXIST))
     }
 
-    /// `fits_read_record` / `ffgrec` (1-based).
-    pub fn read_record(&self, n: usize) -> Result<Card> {
-        self.header()?.record(n)
+    /// `fits_read_record` / `ffgrec` (1-based). `n == 0` reads the next card.
+    pub fn read_record(&mut self, n: usize) -> Result<Card> {
+        let idx = if n == 0 { self.inner()?.nextkey } else { n };
+        let card = self.header()?.record(idx)?;
+        if let Ok(inner) = self.inner_mut() {
+            inner.nextkey = idx + 1;
+        }
+        Ok(card)
     }
 
     /// `fits_read_key_unit` / `ffgunt`.
@@ -283,6 +288,298 @@ impl FitsFile {
             .map(|(v, _)| is_fits_date(&v))
             .unwrap_or(false)
     }
+
+    /// `fits_read_keyword` / `ffgkey`: raw value string + comment.
+    pub fn read_keyword(&mut self, name: &str) -> Result<(String, String)> {
+        let (val, comm) = self.header()?.raw_value_comment(name)?;
+        if let Some(n) = self.header()?.cards().iter().position(|c| {
+            c.keyword_name()
+                .map(|(nm, _)| nm.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        }) {
+            if let Ok(inner) = self.inner_mut() {
+                inner.nextkey = n + 2;
+            }
+        }
+        Ok((val, comm))
+    }
+
+    /// `fits_read_keyn` / `ffgkyn`.
+    pub fn read_keyn(&mut self, n: usize) -> Result<(String, String, String)> {
+        let card = self.header()?.record(n)?;
+        let (name, _) = card.keyword_name()?;
+        let (val, comm) = card.parse_value_comment()?;
+        if let Ok(inner) = self.inner_mut() {
+            inner.nextkey = n + 1;
+        }
+        Ok((name, val, comm))
+    }
+
+    /// `fits_modify_name` / `ffmnam`.
+    pub fn modify_name(&mut self, old: &str, new: &str) -> Result<()> {
+        let card = self.read_card(old)?;
+        let mut c = card;
+        c.set_keyword_name(new);
+        self.header_mut()?.replace_name(old, c)
+    }
+
+    /// `fits_modify_comment` / `ffmcom`.
+    pub fn modify_comment(&mut self, name: &str, comm: &str) -> Result<()> {
+        let (val, _) = self.header()?.raw_value_comment(name)?;
+        self.header_mut()?.modify_with(name, &val, Some(comm))
+    }
+
+    /// `fits_modify_record` / `ffmrec`.
+    pub fn modify_record(&mut self, n: usize, card: &str) -> Result<()> {
+        let idx = n.wrapping_sub(1);
+        self.header_mut()?
+            .replace_record_idx(idx, crate::card::Card::from_text(card))
+    }
+
+    /// `fits_update_card` / `ffucrd`.
+    pub fn update_card(&mut self, name: &str, card: &str) -> Result<()> {
+        if self.header()?.card_by_name(name).is_some() {
+            let c = crate::card::Card::from_text(card);
+            self.header_mut()?.replace_name(name, c)
+        } else {
+            self.write_record(card)
+        }
+    }
+
+    /// `fits_read_keys_lng` / `ffgknj`.
+    pub fn read_keys_lng(&self, root: &str, start: i32, nmax: usize) -> Result<(Vec<i64>, usize)> {
+        Ok(self.header()?.get_keys_long(root, start, nmax))
+    }
+
+    /// `fits_read_keys_str` / `ffgkns`.
+    pub fn read_keys_str(
+        &self,
+        root: &str,
+        start: i32,
+        nmax: usize,
+    ) -> Result<(Vec<String>, usize)> {
+        let mut out = Vec::new();
+        for i in 0..nmax {
+            let name = format!("{root}{}", start as usize + i);
+            match self.header()?.get_string(&name) {
+                Ok((v, _)) => out.push(v),
+                Err(_) => break,
+            }
+        }
+        let n = out.len();
+        Ok((out, n))
+    }
+
+    /// `fits_write_keys_str` / `ffpkns`.
+    pub fn write_keys_str(
+        &mut self,
+        root: &str,
+        start: i32,
+        values: &[&str],
+        comm: Option<&str>,
+    ) -> Result<()> {
+        for (i, val) in values.iter().enumerate() {
+            let name = format!("{root}{}", start as usize + i);
+            self.write_key_str(&name, val, comm)?;
+        }
+        Ok(())
+    }
+
+    /// `fits_write_keys_lng` / `ffpknj`.
+    pub fn write_keys_lng(
+        &mut self,
+        root: &str,
+        start: i32,
+        values: &[i64],
+        comm: Option<&str>,
+    ) -> Result<()> {
+        for (i, val) in values.iter().enumerate() {
+            let name = format!("{root}{}", start as usize + i);
+            self.write_key_lng(&name, *val, comm)?;
+        }
+        Ok(())
+    }
+
+    /// `fits_write_key_lng` of `int.frac` (`fits_write_key_dblcomp` analogue / `ffpkyt`).
+    pub fn write_key_time(
+        &mut self,
+        name: &str,
+        intg: i64,
+        frac: f64,
+        comm: Option<&str>,
+    ) -> Result<()> {
+        let v = format!("{}.{}", intg, format_frac(frac));
+        self.header_mut()?.update_with(name, &v, comm)
+    }
+
+    /// `fits_find_nextkey` / `ffgnxk`.
+    pub fn find_next_key(
+        &mut self,
+        inclist: &[&str],
+        exclist: &[&str],
+    ) -> Result<crate::card::Card> {
+        let start = self.inner()?.nextkey.max(1);
+        let cards = self.inner()?.hdus[self.inner()?.current]
+            .header
+            .cards()
+            .to_vec();
+        for (i, card) in cards.iter().enumerate().skip(start.saturating_sub(1)) {
+            let Ok((name, _)) = card.keyword_name() else {
+                continue;
+            };
+            if matches_any(&name, inclist) && !matches_any(&name, exclist) {
+                self.inner_mut()?.nextkey = i + 2;
+                return Ok(*card);
+            }
+        }
+        Err(crate::FitsError::new(crate::status::KEY_NO_EXIST))
+    }
+
+    /// `fits_write_keys_template` / `ffpktp`.
+    pub fn write_keys_template(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let text = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+            crate::FitsError::with_message(crate::status::FILE_NOT_OPENED, e.to_string())
+        })?;
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            if lower == "end" {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix('-') {
+                let mut parts = rest.split_whitespace();
+                let old = parts.next().unwrap_or("");
+                if let Some(new) = parts.next() {
+                    let _ = self.modify_name(old, new);
+                } else {
+                    let _ = self.delete_key(old.trim());
+                }
+                continue;
+            }
+            if lower.starts_with("comment") {
+                let comm = line[7..].trim_start();
+                self.write_comment(comm)?;
+                continue;
+            }
+            if lower.starts_with("history") {
+                let hist = line[7..].trim_start();
+                self.write_history(hist)?;
+                continue;
+            }
+            self.write_record(line)?;
+        }
+        Ok(())
+    }
+
+    /// `fits_write_key_longstr` / `ffpkls`.
+    pub fn write_key_longstr(&mut self, name: &str, value: &str, comm: Option<&str>) -> Result<()> {
+        // Fits in one card: ordinary string.
+        if value.len() <= 68 {
+            return self.write_key_str(name, value, comm);
+        }
+        let mut rest = value;
+        let first_n = 67usize.min(rest.len());
+        let mut first = rest[..first_n].to_string();
+        first.push('&');
+        self.write_key_str(name, &first, comm)?;
+        rest = &rest[first_n..];
+        while !rest.is_empty() {
+            let n = 67usize.min(rest.len());
+            let mut chunk = rest[..n].to_string();
+            rest = &rest[n..];
+            if !rest.is_empty() {
+                chunk.push('&');
+            }
+            let card = format!("CONTINUE  '{}'", chunk.replace('\'', "''"));
+            self.write_record(&card)?;
+        }
+        Ok(())
+    }
+
+    /// `fits_write_key_longwarn` / `ffplsw`.
+    pub fn write_key_longwarn(&mut self) -> Result<()> {
+        self.write_key_str(
+            "LONGSTRN",
+            "OGIP 1.0",
+            Some("The OGIP long string convention may be used."),
+        )
+    }
+
+    /// `fits_read_key_longstr` / `ffgkls`.
+    pub fn read_key_longstr(&mut self, name: &str) -> Result<(String, String)> {
+        let (val, comm) = self.read_key_str(name)?;
+        let mut out = val;
+        if out.ends_with('&') {
+            out.pop();
+            let cards = self.header()?.cards().to_vec();
+            let start = cards.iter().position(|c| {
+                c.keyword_name()
+                    .map(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+            });
+            if let Some(i) = start {
+                for c in cards.iter().skip(i + 1) {
+                    let text = c.as_str().unwrap_or("");
+                    if !text.starts_with("CONTINUE") {
+                        break;
+                    }
+                    if let Ok((v, _)) = c.parse_value_comment() {
+                        let s = crate::card::unquote_fits_string(&v);
+                        let amp = s.ends_with('&');
+                        out.push_str(s.trim_end_matches('&'));
+                        if !amp {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok((out, comm))
+    }
+}
+
+fn matches_any(name: &str, pats: &[&str]) -> bool {
+    if pats.is_empty() {
+        return false;
+    }
+    pats.iter().any(|p| glob_match(p, name))
+}
+
+fn glob_match(pat: &str, name: &str) -> bool {
+    let p = pat.to_ascii_uppercase();
+    let n = name.to_ascii_uppercase();
+    let mut pi = 0;
+    let pb = p.as_bytes();
+    let nb = n.as_bytes();
+    let mut ni = 0;
+    let mut star = None;
+    while ni < nb.len() {
+        if pi < pb.len() && (pb[pi] == b'?' || pb[pi] == nb[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pb.len() && pb[pi] == b'*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, ni));
+        } else {
+            return false;
+        }
+    }
+    while pi < pb.len() && pb[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pb.len()
+}
+
+fn format_frac(frac: f64) -> String {
+    let s = format!("{frac:.16}");
+    s.trim_start_matches("0.").trim_end_matches('0').to_string()
 }
 
 /// `fits_write_key_str`.

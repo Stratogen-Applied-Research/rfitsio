@@ -7,8 +7,9 @@ use crate::hdu::Hdu;
 use crate::header::{COMM_TBCOL_INSERTED, COMM_TFORM_INSERTED, COMM_TTYPE_INSERTED, Header};
 use crate::io::{self, Driver};
 use crate::status::{
-    BAD_ATABLE_FORMAT, BAD_COL_NUM, BAD_HDU_NUM, BAD_ROW_NUM, BAD_TFIELDS, HEADER_NOT_EMPTY,
-    NEG_BYTES, NOT_ASCII_COL, NOT_TABLE, NUM_OVERFLOW, ZERO_SCALE,
+    BAD_ATABLE_FORMAT, BAD_COL_NUM, BAD_HDU_NUM, BAD_ROW_NUM, BAD_TFIELDS, COL_NOT_FOUND,
+    COL_NOT_UNIQUE, HEADER_NOT_EMPTY, NEG_BYTES, NOT_ASCII_COL, NOT_TABLE, NUM_OVERFLOW,
+    ZERO_SCALE,
 };
 use crate::tform::{
     AsciiKind, AsciiTform, field_is_null, format_ascii_number, format_ascii_string,
@@ -111,6 +112,61 @@ impl FitsFile {
             .header
             .get_i64("TFIELDS")
             .unwrap_or(0) as i32)
+    }
+
+    /// `fits_get_colnum` / `ffgcno`. `casesen` matches CFITSIO (`1` = case sensitive).
+    pub fn get_colnum(&self, casesen: bool, templt: &str) -> Result<i32> {
+        self.require_table()?;
+        let n = self.ncols()?;
+        let mut matches = Vec::new();
+        for i in 1..=n {
+            let name = self
+                .header()?
+                .get_string(&format!("TTYPE{i}"))
+                .map(|(v, _)| v)
+                .unwrap_or_default();
+            let ok = if templt.contains('*') || templt.contains('?') {
+                col_glob(templt, &name, casesen)
+            } else if casesen {
+                name == templt
+            } else {
+                name.eq_ignore_ascii_case(templt)
+            };
+            if ok {
+                matches.push(i);
+            }
+        }
+        match matches.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(FitsError::new(COL_NOT_FOUND)),
+            _ => Err(FitsError::new(COL_NOT_UNIQUE)),
+        }
+    }
+
+    /// `fits_read_tblbytes` / `ffgtbb`.
+    pub fn read_tblbytes(
+        &mut self,
+        firstrow: i64,
+        firstchar: i64,
+        nchars: usize,
+    ) -> Result<Vec<u8>> {
+        self.require_table()?;
+        let (data_start, rowlen) = self.table_geom()?;
+        let pos = data_start + (firstrow - 1) as u64 * rowlen + (firstchar - 1) as u64;
+        let mut buf = vec![0u8; nchars];
+        let n = self.inner_mut()?.io.read_at(pos, &mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// `fits_write_tblbytes` / `ffptbb`.
+    pub fn write_tblbytes(&mut self, firstrow: i64, firstchar: i64, bytes: &[u8]) -> Result<()> {
+        self.require_write()?;
+        self.require_table()?;
+        let (data_start, rowlen) = self.table_geom()?;
+        let pos = data_start + (firstrow - 1) as u64 * rowlen + (firstchar - 1) as u64;
+        self.inner_mut()?.io.write_at(pos, bytes)?;
+        Ok(())
     }
 
     /// Write string values to column `colnum` starting at 1-based `firstrow`.
@@ -399,6 +455,9 @@ impl FitsFile {
     pub fn insert_col(&mut self, numcol: i32, ttype: &str, tform: &str) -> Result<()> {
         self.require_write()?;
         self.require_table()?;
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.insert_bin_col(numcol, ttype, tform);
+        }
         self.require_last_hdu()?;
         let tfields = self.ncols()?;
         if numcol < 1 {
@@ -659,7 +718,7 @@ fn shift_tail(io: &mut dyn Driver, from: u64, nshift: i64, fill: u8) -> Result<(
     Ok(())
 }
 
-fn insert_in_rows(
+pub(crate) fn insert_in_rows(
     io: &mut dyn Driver,
     data_start: u64,
     rowlen: usize,
@@ -714,6 +773,38 @@ fn delete_in_rows(
     }
     io.write_at(data_start, &out)?;
     Ok(())
+}
+
+fn col_glob(pat: &str, name: &str, casesen: bool) -> bool {
+    let (p, n) = if casesen {
+        (pat.to_string(), name.to_string())
+    } else {
+        (pat.to_ascii_uppercase(), name.to_ascii_uppercase())
+    };
+    let pb = p.as_bytes();
+    let nb = n.as_bytes();
+    let mut pi = 0;
+    let mut ni = 0;
+    let mut star = None;
+    while ni < nb.len() {
+        if pi < pb.len() && (pb[pi] == b'?' || pb[pi] == nb[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pb.len() && pb[pi] == b'*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, ni));
+        } else {
+            return false;
+        }
+    }
+    while pi < pb.len() && pb[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pb.len()
 }
 
 /// `fits_create_tbl` for an ASCII table.

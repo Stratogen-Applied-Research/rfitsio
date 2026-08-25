@@ -225,6 +225,71 @@ impl FitsFile {
         )
     }
 
+    pub(crate) fn insert_bin_col(&mut self, numcol: i32, ttype: &str, tform: &str) -> Result<()> {
+        self.require_last_hdu()?;
+        let tfields = self.ncols()?;
+        if numcol < 1 {
+            return Err(FitsError::new(BAD_COL_NUM));
+        }
+        let colnum = if numcol > tfields {
+            tfields + 1
+        } else {
+            numcol
+        };
+        let parsed = parse_binary_tform(tform)?;
+        let nbytes = parsed.row_nbytes() as u64;
+        let forms: Vec<String> = (1..=tfields)
+            .map(|i| {
+                self.header()
+                    .ok()
+                    .and_then(|h| h.get_string(&format!("TFORM{i}")).ok().map(|(v, _)| v))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let form_refs: Vec<&str> = forms.iter().map(String::as_str).collect();
+        let at = if colnum > tfields {
+            self.header()?.get_i64("NAXIS1").unwrap_or(0).max(0) as u64
+        } else {
+            crate::tform::binary_column_offsets(&form_refs)
+                .ok()
+                .and_then(|(_, offs)| offs.get((colnum - 1) as usize).copied())
+                .unwrap_or(0) as u64
+        };
+        let naxis2 = self.nrows()?.max(0) as usize;
+        let naxis1 = self.header()?.get_i64("NAXIS1").unwrap_or(0).max(0) as usize;
+        let (data_start, _) = self.table_geom()?;
+        if naxis2 > 0 && nbytes > 0 {
+            crate::table::insert_in_rows(
+                &mut self.inner_mut()?.io,
+                data_start,
+                naxis1,
+                naxis2,
+                at as usize,
+                nbytes as usize,
+                0,
+            )?;
+        }
+        {
+            let inner = self.inner_mut()?;
+            let header = &mut inner.hdus[inner.current].header;
+            header.update_long_keep_comment("TFIELDS", i64::from(tfields) + 1)?;
+            header.update_long_keep_comment("NAXIS1", naxis1 as i64 + nbytes as i64)?;
+            if colnum <= tfields {
+                header.shift_table_col_keys(colnum, tfields, 1)?;
+            }
+            let stored = BinaryTform::stored_code(tform);
+            header.write_string(&format!("TTYPE{colnum}"), ttype, Some("label for field"))?;
+            header.write_string(
+                &format!("TFORM{colnum}"),
+                &stored,
+                Some("data format of field"),
+            )?;
+            inner.dirty = true;
+        }
+        self.flush()?;
+        Ok(())
+    }
+
     /// Write logical `T`/`F` values.
     pub fn write_col_log(&mut self, colnum: i32, firstrow: i64, values: &[bool]) -> Result<()> {
         self.require_write()?;

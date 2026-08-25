@@ -179,6 +179,15 @@ impl Header {
         self.cards.push(card);
     }
 
+    /// Replace 0-based card `idx`.
+    pub fn replace_record_idx(&mut self, idx: usize, card: Card) -> Result<()> {
+        if idx >= self.cards.len() {
+            return Err(FitsError::new(KEY_OUT_BOUNDS));
+        }
+        self.cards[idx] = card;
+        Ok(())
+    }
+
     /// Cards in order.
     #[must_use]
     pub fn cards(&self) -> &[Card] {

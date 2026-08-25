@@ -7,7 +7,9 @@ use crate::error::{FitsError, Result};
 use crate::hdu::Hdu;
 use crate::header::Header;
 use crate::io::{self, DiskDriver, Driver, MemoryDriver};
-use crate::status::{BAD_FILEPTR, BAD_HDU_NUM, FILE_NOT_CREATED, FILE_NOT_OPENED, READONLY_FILE};
+use crate::status::{
+    BAD_FILEPTR, BAD_HDU_NUM, END_OF_FILE, FILE_NOT_CREATED, FILE_NOT_OPENED, READONLY_FILE,
+};
 use crate::types::{HduType, READONLY, READWRITE};
 
 /// Open mode matching CFITSIO `READONLY` / `READWRITE`.
@@ -79,6 +81,8 @@ pub(crate) struct Inner {
     gzip_out: Option<PathBuf>,
     /// If set, the in-memory image is written to stdout on [`FitsFile::close`].
     emit_stdout: bool,
+    /// 1-based next header record to read (`ffghps` position).
+    pub(crate) nextkey: usize,
 }
 
 impl Inner {
@@ -160,6 +164,7 @@ impl FitsFile {
                     dirty: false,
                     gzip_out: Some(path),
                     emit_stdout: false,
+                    nextkey: 1,
                 }),
             });
         }
@@ -177,6 +182,7 @@ impl FitsFile {
                 dirty: false,
                 gzip_out: None,
                 emit_stdout: false,
+                nextkey: 1,
             }),
         })
     }
@@ -197,6 +203,7 @@ impl FitsFile {
                 dirty: false,
                 gzip_out: None,
                 emit_stdout: false,
+                nextkey: 1,
             }),
         })
     }
@@ -220,6 +227,7 @@ impl FitsFile {
                 dirty: false,
                 gzip_out: None,
                 emit_stdout: false,
+                nextkey: 1,
             }),
         })
     }
@@ -260,6 +268,7 @@ impl FitsFile {
                     dirty: false,
                     gzip_out,
                     emit_stdout: false,
+                    nextkey: 1,
                 }),
             });
         }
@@ -278,6 +287,7 @@ impl FitsFile {
                 dirty: false,
                 gzip_out: None,
                 emit_stdout: false,
+                nextkey: 1,
             }),
         })
     }
@@ -312,14 +322,111 @@ impl FitsFile {
     }
 
     /// Move to 1-based HDU `hdunum` (`fits_movabs_hdu` / `ffmahd`).
+    ///
+    /// Moving past the last HDU returns [`END_OF_FILE`] (CFITSIO). `hdunum < 1`
+    /// is [`BAD_HDU_NUM`].
     pub fn movabs_hdu(&mut self, hdunum: usize) -> Result<HduType> {
         self.flush_inner()?;
         let inner = self.inner_mut()?;
-        if hdunum < 1 || hdunum > inner.hdus.len() {
+        if hdunum < 1 {
             return Err(FitsError::new(BAD_HDU_NUM));
         }
+        if hdunum > inner.hdus.len() {
+            return Err(FitsError::new(END_OF_FILE));
+        }
         inner.current = hdunum - 1;
+        inner.nextkey = 1;
         Ok(inner.hdus[inner.current].hdu_type)
+    }
+
+    /// `fits_movrel_hdu` / `ffmrhd`.
+    pub fn movrel_hdu(&mut self, nmove: i32) -> Result<HduType> {
+        let here = self.hdunum()? as i32;
+        let dest = here + nmove;
+        if dest < 1 {
+            return Err(FitsError::new(BAD_HDU_NUM));
+        }
+        self.movabs_hdu(dest as usize)
+    }
+
+    /// `fits_movnam_hdu` / `ffmnhd`. `extver == 0` means any version.
+    pub fn movnam_hdu(&mut self, hdutype: i32, extname: &str, extver: i32) -> Result<HduType> {
+        self.flush_inner()?;
+        let inner = self.inner()?;
+        let mut found = None;
+        for (i, hdu) in inner.hdus.iter().enumerate() {
+            if hdutype >= 0 && hdu.hdu_type.code() != hdutype {
+                continue;
+            }
+            let name = hdu
+                .header
+                .get_string("EXTNAME")
+                .map(|(v, _)| v)
+                .unwrap_or_default();
+            if !name.eq_ignore_ascii_case(extname) {
+                continue;
+            }
+            let ver = hdu.header.get_i64("EXTVER").unwrap_or(1) as i32;
+            if extver != 0 && ver != extver {
+                continue;
+            }
+            found = Some(i);
+            break;
+        }
+        let idx = found.ok_or_else(|| FitsError::new(BAD_HDU_NUM))?;
+        let inner = self.inner_mut()?;
+        inner.current = idx;
+        inner.nextkey = 1;
+        Ok(inner.hdus[idx].hdu_type)
+    }
+
+    /// `fits_file_name` / `ffflnm`.
+    pub fn filename(&self) -> Result<String> {
+        Ok(self
+            .inner()?
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// `fits_file_mode` / `ffflmd`.
+    pub fn filemode(&self) -> Result<i32> {
+        Ok(if self.inner()?.writable {
+            READWRITE
+        } else {
+            READONLY
+        })
+    }
+
+    /// `fits_delete_file` / `ffdelt`.
+    pub fn delete_file(mut self) -> Result<()> {
+        let path = self.inner()?.path.clone();
+        let gzip = self.inner()?.gzip_out.clone();
+        self.inner.take();
+        if let Some(p) = gzip.or(path) {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
+    }
+
+    /// `fits_get_hdrpos` / `ffghps`: (existing keywords, next keyword number).
+    pub fn hdrpos(&self) -> Result<(usize, usize)> {
+        let inner = self.inner()?;
+        Ok((inner.hdus[inner.current].header.len(), inner.nextkey.max(1)))
+    }
+
+    /// `fits_write_record` / `ffprec`.
+    pub fn write_record(&mut self, card: &str) -> Result<()> {
+        self.header_mut()?.write_record(card);
+        Ok(())
+    }
+
+    /// `fits_get_num_hdus` / `ffthdu`.
+    pub fn get_num_hdus(&self) -> Result<i32> {
+        Ok(self.hdu_count()? as i32)
     }
 
     /// Current HDU header.
@@ -434,6 +541,7 @@ fn flush_header_and_maybe_shift(inner: &mut Inner) -> Result<()> {
         inner.bump_offsets_from(idx + 1, delta);
     }
     inner.io.write_at(header_start, &hb)?;
+    inner.hdus[idx].hdu_type = hdu_type_from_header(&inner.hdus[idx].header);
     inner.hdus[idx].data_start = new_data_start;
     let tail = if data_bytes > 0 {
         crate::convert::pad_data_len(data_bytes)

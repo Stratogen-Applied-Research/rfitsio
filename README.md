@@ -20,6 +20,8 @@ Layer A (core I/O) is under construction. Currently implemented:
 - HDU surgery: copy / delete / insert image and table HDUs (`ffcopy`, `ffcpfl`, `ffdhdu`, `ffiimg`, `ffitab`, `ffibin`)
 - `CHECKSUM` / `DATASUM` (`ffpcks`, `ffvcks`, `ffgcks`, `ffesum`)
 - gzip `.gz` read/write (pure-Rust `flate2`), stdin/stdout and `write_hdu_to` streams
+- Cookbook example (`cargo run --example cookbook`) matching CFITSIO `cookbook.out`
+- `testprog` gate: checksum encode/decode, WCS `-TAN`, missing-file and HDU-move status codes locked to `testprog.out`
 
 ## Development
 
@@ -29,3 +31,5 @@ cargo test
 ```
 
 Requires CMake, a C compiler, and zlib (to build the test-only oracle).
+
+The published library forbids `unsafe`. Lib unit tests (`cargo +nightly miri test --lib`) are Miri-clean once the test-only `cfitsio-sys` oracle is not pulled in; integration tests that link the C oracle are not run under Miri.

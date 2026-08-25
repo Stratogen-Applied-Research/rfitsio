@@ -1,9 +1,36 @@
 //! [`FitsError`]: CFITSIO status plus an optional message stack.
 
+use std::cell::RefCell;
 use std::error::Error;
 use std::fmt;
 
 use crate::status;
+
+thread_local! {
+    static MSG_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Push a message onto the per-thread analogue of CFITSIO's `ffpmsg` stack.
+pub fn push_err_msg(msg: impl Into<String>) {
+    MSG_STACK.with(|s| s.borrow_mut().push(msg.into()));
+}
+
+/// Pop the oldest message (`fits_read_errmsg` / `ffgmsg`).
+pub fn pop_err_msg() -> Option<String> {
+    MSG_STACK.with(|s| {
+        let mut v = s.borrow_mut();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.remove(0))
+        }
+    })
+}
+
+/// Clear the message stack (`fits_clear_errmsg` / `ffcmsg`).
+pub fn clear_err_msg() {
+    MSG_STACK.with(|s| s.borrow_mut().clear());
+}
 
 /// An error identified by a CFITSIO status code.
 ///

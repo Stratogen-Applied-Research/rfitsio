@@ -24,6 +24,7 @@ pub mod status;
 pub mod table;
 pub mod tform;
 pub mod types;
+pub mod wcs;
 
 pub use card::{
     Card, fits_get_keyclass, fits_get_keyname, fits_make_key, fits_parse_value, fits_test_keyword,
@@ -37,7 +38,7 @@ pub use edithdu::{
     fits_copy_data, fits_copy_file, fits_copy_hdu, fits_copy_header, fits_create_hdu,
     fits_delete_hdu, fits_insert_atbl, fits_insert_btbl, fits_insert_img, fits_write_hdu,
 };
-pub use error::{FitsError, Result};
+pub use error::{FitsError, Result, clear_err_msg, pop_err_msg, push_err_msg};
 pub use file::{
     AccessMode, FitsFile, fits_close_file, fits_create_file, fits_create_memfile, fits_open_file,
 };
@@ -54,3 +55,4 @@ pub use types::{
     CARD_LEN, CFITSIO_MAJOR, CFITSIO_MICRO, CFITSIO_MINOR, HduType, ImageType, KeyClass,
     RECORD_LEN, cfitsio_version_float,
 };
+pub use wcs::{pix_to_world, read_img_coord, world_to_pix};
