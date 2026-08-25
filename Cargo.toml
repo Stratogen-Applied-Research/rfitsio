@@ -15,7 +15,7 @@ homepage = "https://github.com/Stratogen-Applied-Research/rfitsio"
 documentation = "https://docs.rs/srfits"
 keywords = ["fits", "astronomy", "cfitsio"]
 categories = ["science", "parser-implementations"]
-exclude = ["vendor", "crates/cfitsio-sys"]
+exclude = ["vendor", "crates/cfitsio-sys", "docs", "workplans"]
 
 [lib]
 name = "rfitsio"

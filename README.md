@@ -29,11 +29,12 @@ Layer A (core I/O) and Layer B (tiled image compression) are implemented:
 - Binary table HDUs: `TFORMn` `L/X/B/I/J/K/A/E/D/C/M` plus unsigned `S/U/V/W`, column I/O, `P`/`Q` variable-length arrays and heap/`PCOUNT`
 - HDU surgery: copy / delete / insert image and table HDUs (`ffcopy`, `ffcpfl`, `ffdhdu`, `ffiimg`, `ffitab`, `ffibin`)
 - `CHECKSUM` / `DATASUM` (`ffpcks`, `ffvcks`, `ffgcks`, `ffesum`)
-- gzip `.gz` read/write (pure-Rust `flate2`), stdin/stdout and `write_hdu_to` streams
+- gzip `.gz` read/write (pure-Rust `flate2`) via a scratch disk file so large search-mode files are not inflated into RAM; stdin/stdout and `write_hdu_to` streams
 - Cookbook example (`cargo run --example cookbook`) matching CFITSIO `cookbook.out`
 - `testprog` gate: checksum encode/decode, WCS `-TAN`, missing-file and HDU-move status codes locked to `testprog.out`
 - Tiled compressed images (`ZIMAGE`): `RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1`, `HCOMPRESS_1`, lossless float gzip (`ZQUANTIZ=NONE`), and quantized floats with subtractive dither. Pixel identity after funpack / CFITSIO `fits_read_img` is the gate
-- Binary-table vector cells (`firstrow` / `firstelem` / `nelem`, CFITSIO flattened order), `TDIMn` parse/write and Fortran-order indexing, PSRFITS `NBIT` 1/2/4/8 pack/unpack. See `docs/psrfits.md`.
+- Binary-table vector cells (`firstrow` / `firstelem` / `nelem`, CFITSIO flattened order), `TDIMn` parse/write and Fortran-order indexing
+- PSRFITS helpers: `NBIT` 1/2/4/8 pack/unpack, `DAT_SCL`/`DAT_OFFS`/`DAT_WTS`, `FitsFile::read_subint_data` (`rfitsio::psrfits`)
 
 ## Development
 

@@ -22,6 +22,7 @@ pub mod image;
 pub mod io;
 pub mod keys;
 pub mod nbit;
+pub mod psrfits;
 pub mod status;
 pub mod table;
 pub mod tdim;
@@ -50,6 +51,10 @@ pub use header::{AsciiTableInfo, BinaryTableInfo, Header, PrimaryInfo};
 pub use image::{Pixel, fits_create_img, fits_read_img, fits_write_img};
 pub use keys::{fits_read_key_str, fits_write_date, fits_write_key_str};
 pub use nbit::{pack_samples, samples_per_byte, unpack_samples};
+pub use psrfits::{
+    CubeLayout, SubintInfo, apply_channel_weights, apply_scale, decode_packed_samples,
+    encode_packed_samples, invert_scale,
+};
 pub use status::{fits_get_errstatus, status_text};
 pub use table::{fits_create_tbl, fits_movabs_hdu};
 pub use tdim::{

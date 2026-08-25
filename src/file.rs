@@ -8,9 +8,9 @@ use crate::hdu::Hdu;
 use crate::header::Header;
 use crate::io::{self, DiskDriver, Driver, MemoryDriver};
 use crate::status::{
-    BAD_FILEPTR, BAD_HDU_NUM, END_OF_FILE, FILE_NOT_CREATED, FILE_NOT_OPENED, READONLY_FILE,
+    BAD_FILEPTR, BAD_HDU_NUM, END_OF_FILE, FILE_NOT_CREATED, FILE_NOT_OPENED, NO_END, READONLY_FILE,
 };
-use crate::types::{HduType, READONLY, READWRITE};
+use crate::types::{HduType, READONLY, READWRITE, RECORD_LEN};
 
 /// Open mode matching CFITSIO `READONLY` / `READWRITE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,8 +77,10 @@ pub(crate) struct Inner {
     pub(crate) hdus: Vec<Hdu>,
     pub(crate) current: usize,
     pub(crate) dirty: bool,
-    /// If set, the in-memory image is gzipped to this path on close.
+    /// If set, the working image is gzipped to this path on close.
     gzip_out: Option<PathBuf>,
+    /// Uncompressed scratch used for gzip I/O; deleted on close/drop.
+    scratch: Option<PathBuf>,
     /// If set, the in-memory image is written to stdout on [`FitsFile::close`].
     emit_stdout: bool,
     /// 1-based next header record to read (`ffghps` position).
@@ -88,6 +90,30 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    fn new(
+        io: Backend,
+        writable: bool,
+        path: Option<PathBuf>,
+        hdus: Vec<Hdu>,
+        gzip_out: Option<PathBuf>,
+        scratch: Option<PathBuf>,
+        emit_stdout: bool,
+    ) -> Self {
+        Self {
+            io,
+            writable,
+            path,
+            hdus,
+            current: 0,
+            dirty: false,
+            gzip_out,
+            scratch,
+            emit_stdout,
+            nextkey: 1,
+            compression: crate::compress::CompressionRequest::default(),
+        }
+    }
+
     pub(crate) fn last_end(&self) -> Result<u64> {
         let last = self
             .hdus
@@ -152,42 +178,22 @@ impl FitsFile {
             if path.exists() {
                 return Err(FitsError::new(FILE_NOT_CREATED));
             }
-            let mut io = Backend::Memory(MemoryDriver::new());
-            let hdu = Hdu::empty_primary()?;
-            let bytes = hdu.header.to_record_bytes();
-            io::write_all(&mut io, &bytes)?;
-            return Ok(Self {
-                inner: Some(Inner {
-                    io,
-                    writable: true,
-                    path: Some(path.clone()),
-                    hdus: vec![hdu],
-                    current: 0,
-                    dirty: false,
-                    gzip_out: Some(path),
-                    emit_stdout: false,
-                    nextkey: 1,
-                    compression: crate::compress::CompressionRequest::default(),
-                }),
-            });
+            return create_gzip_dest(path);
         }
         let mut io = Backend::Disk(DiskDriver::create(&path)?);
         let hdu = Hdu::empty_primary()?;
         let bytes = hdu.header.to_record_bytes();
         io::write_all(&mut io, &bytes)?;
         Ok(Self {
-            inner: Some(Inner {
+            inner: Some(Inner::new(
                 io,
-                writable: true,
-                path: Some(path),
-                hdus: vec![hdu],
-                current: 0,
-                dirty: false,
-                gzip_out: None,
-                emit_stdout: false,
-                nextkey: 1,
-                compression: crate::compress::CompressionRequest::default(),
-            }),
+                true,
+                Some(path),
+                vec![hdu],
+                None,
+                None,
+                false,
+            )),
         })
     }
 
@@ -198,18 +204,7 @@ impl FitsFile {
         let bytes = hdu.header.to_record_bytes();
         io::write_all(&mut io, &bytes)?;
         Ok(Self {
-            inner: Some(Inner {
-                io,
-                writable: true,
-                path: None,
-                hdus: vec![hdu],
-                current: 0,
-                dirty: false,
-                gzip_out: None,
-                emit_stdout: false,
-                nextkey: 1,
-                compression: crate::compress::CompressionRequest::default(),
-            }),
+            inner: Some(Inner::new(io, true, None, vec![hdu], None, None, false)),
         })
     }
 
@@ -221,20 +216,18 @@ impl FitsFile {
         if data.is_empty() {
             return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
         }
-        let hdus = parse_hdus(&data)?;
+        let mut mem = MemoryDriver::from_vec(data);
+        let hdus = parse_hdus_io(&mut mem)?;
         Ok(Self {
-            inner: Some(Inner {
-                io: Backend::Memory(MemoryDriver::from_vec(data)),
-                writable: true,
-                path: None,
+            inner: Some(Inner::new(
+                Backend::Memory(mem),
+                true,
+                None,
                 hdus,
-                current: 0,
-                dirty: false,
-                gzip_out: None,
-                emit_stdout: false,
-                nextkey: 1,
-                compression: crate::compress::CompressionRequest::default(),
-            }),
+                None,
+                None,
+                false,
+            )),
         })
     }
 
@@ -247,7 +240,8 @@ impl FitsFile {
 
     /// Open an existing disk file.
     ///
-    /// gzip files (`*.gz`, or gzip magic) are decompressed into memory.
+    /// gzip files (`*.gz`, or gzip magic) are decompressed to a scratch disk
+    /// file so search-mode PSRFITS does not have to sit fully in RAM.
     /// If `path` is missing, `path` with a `.gz` suffix is tried (CFITSIO).
     /// `"-"` / `"stdin"` reads the process stdin.
     pub fn open(path: impl AsRef<Path>, mode: AccessMode) -> Result<Self> {
@@ -256,47 +250,25 @@ impl FitsFile {
             return Self::open_reader(std::io::stdin());
         }
         let writable = mode == AccessMode::ReadWrite;
-        let (actual, raw) = read_open_bytes(path)?;
-        if is_gzip_magic(&raw) {
-            let data = maybe_gunzip(&raw)?;
-            if data.is_empty() {
-                return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
-            }
-            let hdus = parse_hdus(&data)?;
-            let gzip_out = if writable { Some(actual.clone()) } else { None };
-            return Ok(Self {
-                inner: Some(Inner {
-                    io: Backend::Memory(MemoryDriver::from_vec(data)),
-                    writable,
-                    path: Some(actual),
-                    hdus,
-                    current: 0,
-                    dirty: false,
-                    gzip_out,
-                    emit_stdout: false,
-                    nextkey: 1,
-                    compression: crate::compress::CompressionRequest::default(),
-                }),
-            });
+        let actual = resolve_open_path(path)?;
+        if path_is_gzip(&actual)? {
+            return open_gzip(&actual, writable);
         }
-        if raw.is_empty() {
+        let mut disk = DiskDriver::open(&actual, writable)?;
+        if disk.len()? == 0 {
             return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
         }
-        let hdus = parse_hdus(&raw)?;
-        let io = Backend::Disk(DiskDriver::open(&actual, writable)?);
+        let hdus = parse_hdus_io(&mut disk)?;
         Ok(Self {
-            inner: Some(Inner {
-                io,
+            inner: Some(Inner::new(
+                Backend::Disk(disk),
                 writable,
-                path: Some(actual),
+                Some(actual),
                 hdus,
-                current: 0,
-                dirty: false,
-                gzip_out: None,
-                emit_stdout: false,
-                nextkey: 1,
-                compression: crate::compress::CompressionRequest::default(),
-            }),
+                None,
+                None,
+                false,
+            )),
         })
     }
 
@@ -304,7 +276,7 @@ impl FitsFile {
     pub fn close(mut self) -> Result<()> {
         self.flush_inner()?;
         self.persist_special(true)?;
-        self.inner.take();
+        self.take_and_cleanup_scratch();
         Ok(())
     }
 
@@ -416,7 +388,7 @@ impl FitsFile {
     pub fn delete_file(mut self) -> Result<()> {
         let path = self.inner()?.path.clone();
         let gzip = self.inner()?.gzip_out.clone();
-        self.inner.take();
+        self.take_and_cleanup_scratch();
         if let Some(p) = gzip.or(path) {
             let _ = std::fs::remove_file(p);
         }
@@ -510,11 +482,11 @@ impl FitsFile {
         if gzip_out.is_none() && !do_stdout {
             return Ok(());
         }
-        let bytes = io::read_all(&mut self.inner_mut()?.io)?;
         if let Some(path) = gzip_out {
-            write_gzip_file(&path, &bytes)?;
+            write_gzip_from_driver(&mut self.inner_mut()?.io, &path)?;
         }
         if do_stdout {
+            let bytes = io::read_all(&mut self.inner_mut()?.io)?;
             std::io::stdout()
                 .write_all(&bytes)
                 .map_err(io::map_write_err)?;
@@ -522,13 +494,21 @@ impl FitsFile {
         }
         Ok(())
     }
+
+    fn take_and_cleanup_scratch(&mut self) {
+        let scratch = self.inner.as_ref().and_then(|i| i.scratch.clone());
+        self.inner.take();
+        if let Some(p) = scratch {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 impl Drop for FitsFile {
     fn drop(&mut self) {
         let _ = self.flush_inner();
         let _ = self.persist_special(false);
-        self.inner.take();
+        self.take_and_cleanup_scratch();
     }
 }
 
@@ -574,15 +554,14 @@ fn flush_header_and_maybe_shift(inner: &mut Inner) -> Result<()> {
     Ok(())
 }
 
-fn parse_hdus(bytes: &[u8]) -> Result<Vec<Hdu>> {
+fn parse_hdus_io(io: &mut dyn Driver) -> Result<Vec<Hdu>> {
+    let file_len = io.len()?;
     let mut hdus = Vec::new();
     let mut offset = 0u64;
-    while (offset as usize) < bytes.len() {
-        let slice = &bytes[offset as usize..];
-        if slice.iter().all(|&b| b == 0) {
+    while offset < file_len {
+        let Some((header, header_len)) = read_header_at(io, offset, file_len)? else {
             break;
-        }
-        let (header, header_len) = Header::parse(slice)?;
+        };
         let hdu_type = hdu_type_from_header(&header);
         let mut hdu = Hdu {
             hdu_type,
@@ -591,11 +570,10 @@ fn parse_hdus(bytes: &[u8]) -> Result<Vec<Hdu>> {
             data_start: offset + header_len,
         };
         let data_unit = hdu.data_unit_len()?;
-        // `Header::parse` returns the padded header length as data_start.
         hdu.data_start = offset + header_len;
         hdus.push(hdu);
         offset += header_len + data_unit;
-        if offset == 0 {
+        if header_len == 0 {
             break;
         }
     }
@@ -603,6 +581,134 @@ fn parse_hdus(bytes: &[u8]) -> Result<Vec<Hdu>> {
         return Err(FitsError::with_message(FILE_NOT_OPENED, "no HDUs found"));
     }
     Ok(hdus)
+}
+
+fn read_header_at(
+    io: &mut dyn Driver,
+    offset: u64,
+    file_len: u64,
+) -> Result<Option<(Header, u64)>> {
+    if offset >= file_len {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    loop {
+        let pos = offset + buf.len() as u64;
+        if pos >= file_len {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            return Err(FitsError::new(NO_END));
+        }
+        let mut rec = [0u8; RECORD_LEN];
+        let want = RECORD_LEN.min((file_len - pos) as usize);
+        let n = io.read_at(pos, &mut rec[..want])?;
+        if n == 0 {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            return Err(FitsError::new(NO_END));
+        }
+        if buf.is_empty() && rec[..n].iter().all(|&b| b == 0) {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&rec[..n]);
+        if n < RECORD_LEN {
+            return Err(FitsError::new(NO_END));
+        }
+        match Header::parse(&buf) {
+            Ok((header, header_len)) => return Ok(Some((header, header_len))),
+            Err(e) if e.status == NO_END => {
+                if buf.len() > RECORD_LEN * 1024 {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn create_gzip_dest(path: PathBuf) -> Result<FitsFile> {
+    #[cfg(feature = "gzip")]
+    {
+        let (disk, scratch) = DiskDriver::create_temp()?;
+        let mut io = Backend::Disk(disk);
+        let hdu = Hdu::empty_primary()?;
+        let bytes = hdu.header.to_record_bytes();
+        io::write_all(&mut io, &bytes)?;
+        Ok(FitsFile {
+            inner: Some(Inner::new(
+                io,
+                true,
+                Some(path.clone()),
+                vec![hdu],
+                Some(path),
+                Some(scratch),
+                false,
+            )),
+        })
+    }
+    #[cfg(not(feature = "gzip"))]
+    {
+        let mut io = Backend::Memory(MemoryDriver::new());
+        let hdu = Hdu::empty_primary()?;
+        let bytes = hdu.header.to_record_bytes();
+        io::write_all(&mut io, &bytes)?;
+        Ok(FitsFile {
+            inner: Some(Inner::new(
+                io,
+                true,
+                Some(path.clone()),
+                vec![hdu],
+                Some(path),
+                None,
+                false,
+            )),
+        })
+    }
+}
+
+fn open_gzip(actual: &Path, writable: bool) -> Result<FitsFile> {
+    #[cfg(feature = "gzip")]
+    {
+        let (mut disk, scratch) = DiskDriver::create_temp()?;
+        crate::io::gzip::decompress_file_to_driver(actual, &mut disk)?;
+        if disk.len()? == 0 {
+            let _ = std::fs::remove_file(&scratch);
+            return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
+        }
+        let hdus = match parse_hdus_io(&mut disk) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = std::fs::remove_file(&scratch);
+                return Err(e);
+            }
+        };
+        let gzip_out = if writable {
+            Some(actual.to_path_buf())
+        } else {
+            None
+        };
+        Ok(FitsFile {
+            inner: Some(Inner::new(
+                Backend::Disk(disk),
+                writable,
+                Some(actual.to_path_buf()),
+                hdus,
+                gzip_out,
+                Some(scratch),
+                false,
+            )),
+        })
+    }
+    #[cfg(not(feature = "gzip"))]
+    {
+        let _ = writable;
+        Err(FitsError::with_message(
+            FILE_NOT_OPENED,
+            "gzip support is disabled (rebuild with the gzip feature)",
+        ))
+    }
 }
 
 pub(crate) fn logical_hdu_type(hdu: &Hdu) -> HduType {
@@ -650,17 +756,27 @@ fn is_gzip_magic(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
 }
 
-fn read_open_bytes(path: &Path) -> Result<(PathBuf, Vec<u8>)> {
-    match std::fs::read(path) {
-        Ok(b) => Ok((path.to_path_buf(), b)),
-        Err(_) => {
-            let mut gz = path.as_os_str().to_os_string();
-            gz.push(".gz");
-            let gz_path = PathBuf::from(gz);
-            let b = std::fs::read(&gz_path).map_err(io::map_open_err)?;
-            Ok((gz_path, b))
-        }
+fn resolve_open_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.to_path_buf());
     }
+    let mut gz = path.as_os_str().to_os_string();
+    gz.push(".gz");
+    let gz_path = PathBuf::from(gz);
+    if gz_path.exists() {
+        return Ok(gz_path);
+    }
+    Err(FitsError::with_message(
+        FILE_NOT_OPENED,
+        format!("could not open {}", path.display()),
+    ))
+}
+
+fn path_is_gzip(path: &Path) -> Result<bool> {
+    let mut f = std::fs::File::open(path).map_err(io::map_open_err)?;
+    let mut mag = [0u8; 2];
+    let n = f.read(&mut mag).map_err(io::map_read_err)?;
+    Ok(is_gzip_magic(&mag[..n]))
 }
 
 fn maybe_gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -680,15 +796,14 @@ fn maybe_gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-fn write_gzip_file(path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_gzip_from_driver(io: &mut dyn Driver, path: &Path) -> Result<()> {
     #[cfg(feature = "gzip")]
     {
-        let gz = crate::io::gzip::compress(bytes)?;
-        std::fs::write(path, gz).map_err(io::map_write_err)
+        crate::io::gzip::compress_driver_to_file(io, path)
     }
     #[cfg(not(feature = "gzip"))]
     {
-        let _ = (path, bytes);
+        let _ = (io, path);
         Err(FitsError::with_message(
             FILE_NOT_CREATED,
             "gzip support is disabled (rebuild with the gzip feature)",

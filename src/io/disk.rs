@@ -2,10 +2,14 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{Driver, map_create_err, map_open_err, map_read_err, map_write_err};
-use crate::error::Result;
+use crate::error::{FitsError, Result};
+use crate::status::FILE_NOT_CREATED;
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Filesystem-backed store.
 pub struct DiskDriver {
@@ -32,6 +36,31 @@ impl DiskDriver {
             .open(path.as_ref())
             .map_err(map_open_err)?;
         Ok(Self { file })
+    }
+
+    /// Unique scratch file in the process temp directory (deleted by the caller).
+    pub fn create_temp() -> Result<(Self, PathBuf)> {
+        let pid = std::process::id();
+        for _ in 0..1024 {
+            let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("srfits-{pid}-{seq}.fits"));
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
+                Ok(file) => return Ok((Self { file }, path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(map_create_err(e)),
+            }
+        }
+        Err(FitsError::with_message(
+            FILE_NOT_CREATED,
+            "could not create a unique scratch FITS file",
+        ))
     }
 }
 
