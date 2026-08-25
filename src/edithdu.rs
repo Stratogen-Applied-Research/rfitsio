@@ -1,5 +1,7 @@
 //! Copy, insert, and delete HDUs (`edithdu.c`).
 
+use std::io::Write;
+
 use crate::convert::pad_data_len;
 use crate::error::{FitsError, Result};
 use crate::file::FitsFile;
@@ -196,6 +198,24 @@ impl FitsFile {
             }
         }
         self.movabs_hdu(here)?;
+        Ok(())
+    }
+
+    /// `fits_write_hdu` / `ffwrhdu`: write the current HDU to `writer`.
+    pub fn write_hdu_to<W: Write>(&mut self, writer: &mut W) -> Result<()> {
+        self.flush()?;
+        let inner = self.inner_mut()?;
+        let idx = inner.current;
+        let start = inner.hdus[idx].header_start;
+        let end = inner.hdus[idx].end()?;
+        let len = (end - start) as usize;
+        let mut buf = vec![0u8; len];
+        if len > 0 {
+            let n = inner.io.read_at(start, &mut buf)?;
+            buf.truncate(n);
+        }
+        writer.write_all(&buf).map_err(io::map_write_err)?;
+        writer.flush().map_err(io::map_write_err)?;
         Ok(())
     }
 
@@ -492,6 +512,11 @@ pub fn fits_copy_data(src: &mut FitsFile, dest: &mut FitsFile) -> Result<()> {
 /// `fits_create_hdu` / `ffcrhd`.
 pub fn fits_create_hdu(f: &mut FitsFile) -> Result<()> {
     f.create_hdu()
+}
+
+/// `fits_write_hdu` / `ffwrhdu`.
+pub fn fits_write_hdu<W: Write>(f: &mut FitsFile, writer: &mut W) -> Result<()> {
+    f.write_hdu_to(writer)
 }
 
 /// `fits_insert_img` / `ffiimg`.

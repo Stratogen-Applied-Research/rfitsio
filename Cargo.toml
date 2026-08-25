@@ -19,8 +19,12 @@ name = "rfitsio"
 path = "src/lib.rs"
 
 [features]
-default = ["std"]
+default = ["std", "gzip"]
 std = []
+gzip = ["dep:flate2"]
+
+[dependencies]
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 cfitsio-sys = { path = "crates/cfitsio-sys" }

@@ -18,6 +18,8 @@ Layer A (core I/O) is under construction. Currently implemented:
 - ASCII table HDUs: `TFORMn` `Aw`/`Iw`/`Fw.d`/`Ew.d`/`Dw.d`, `TBCOL` spacing, column I/O, `TNULL`, row/column insert-delete
 - Binary table HDUs: `TFORMn` `L/X/B/I/J/K/A/E/D/C/M` plus unsigned `S/U/V/W`, column I/O, `P`/`Q` variable-length arrays and heap/`PCOUNT`
 - HDU surgery: copy / delete / insert image and table HDUs (`ffcopy`, `ffcpfl`, `ffdhdu`, `ffiimg`, `ffitab`, `ffibin`)
+- `CHECKSUM` / `DATASUM` (`ffpcks`, `ffvcks`, `ffgcks`, `ffesum`)
+- gzip `.gz` read/write (pure-Rust `flate2`), stdin/stdout and `write_hdu_to` streams
 
 ## Development
 

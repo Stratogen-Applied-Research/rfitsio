@@ -6,6 +6,9 @@ mod memory;
 pub use disk::DiskDriver;
 pub use memory::MemoryDriver;
 
+#[cfg(feature = "gzip")]
+pub mod gzip;
+
 use crate::error::{FitsError, Result};
 use crate::status::{FILE_NOT_CLOSED, FILE_NOT_CREATED, FILE_NOT_OPENED, READ_ERROR, WRITE_ERROR};
 use crate::types::RECORD_LEN;

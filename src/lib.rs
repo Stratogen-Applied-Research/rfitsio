@@ -9,6 +9,7 @@
 
 pub mod bintable;
 pub mod card;
+pub mod checksum;
 pub mod convert;
 pub mod datetime;
 pub mod edithdu;
@@ -28,9 +29,13 @@ pub use card::{
     Card, fits_get_keyclass, fits_get_keyname, fits_make_key, fits_parse_value, fits_test_keyword,
     make_card_string,
 };
+pub use checksum::{
+    add_checksum_record, decode_checksum, encode_checksum, fits_decode_chksum, fits_encode_chksum,
+    fits_get_chksum, fits_update_chksum, fits_verify_chksum, fits_write_chksum,
+};
 pub use edithdu::{
     fits_copy_data, fits_copy_file, fits_copy_hdu, fits_copy_header, fits_create_hdu,
-    fits_delete_hdu, fits_insert_atbl, fits_insert_btbl, fits_insert_img,
+    fits_delete_hdu, fits_insert_atbl, fits_insert_btbl, fits_insert_img, fits_write_hdu,
 };
 pub use error::{FitsError, Result};
 pub use file::{

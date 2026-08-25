@@ -17,6 +17,12 @@ impl MemoryDriver {
         Self { data: Vec::new() }
     }
 
+    /// Buffer wrapping existing bytes.
+    #[must_use]
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+
     /// Take ownership of the bytes.
     #[must_use]
     pub fn into_inner(self) -> Vec<u8> {

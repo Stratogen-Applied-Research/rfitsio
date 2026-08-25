@@ -5,7 +5,7 @@
 
 #![allow(non_camel_case_types)]
 
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_longlong, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_longlong, c_ulong, c_void};
 use std::sync::Mutex;
 
 /// CFITSIO process-global state (I/O drivers, error stack) is not reentrant
@@ -354,6 +354,22 @@ unsafe extern "C" {
         status: *mut c_int,
     ) -> c_int;
     fn ffthdu(fptr: *mut c_void, nhdu: *mut c_int, status: *mut c_int) -> c_int;
+    fn ffesum(sum: c_ulong, complm: c_int, ascii: *mut c_char);
+    fn ffdsum(ascii: *mut c_char, complm: c_int, sum: *mut c_ulong) -> c_ulong;
+    fn ffpcks(fptr: *mut c_void, status: *mut c_int) -> c_int;
+    fn ffupck(fptr: *mut c_void, status: *mut c_int) -> c_int;
+    fn ffvcks(
+        fptr: *mut c_void,
+        datastatus: *mut c_int,
+        hdustatus: *mut c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgcks(
+        fptr: *mut c_void,
+        datasum: *mut c_ulong,
+        hdusum: *mut c_ulong,
+        status: *mut c_int,
+    ) -> c_int;
 }
 
 pub const ASCII_TBL: c_int = 1;
@@ -1375,6 +1391,64 @@ impl CFile {
         status as i32
     }
 
+    /// `ffpcks`.
+    pub fn write_chksum(&mut self) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffpcks(self.fptr, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffupck`.
+    pub fn update_chksum(&mut self) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffupck(self.fptr, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffvcks`. Returns `(datastatus, hdustatus)`.
+    pub fn verify_chksum(&mut self) -> Result<(i32, i32), i32> {
+        let _g = lock();
+        let mut datastatus: c_int = 0;
+        let mut hdustatus: c_int = 0;
+        let mut status: c_int = 0;
+        unsafe {
+            ffvcks(
+                self.fptr,
+                &raw mut datastatus,
+                &raw mut hdustatus,
+                &raw mut status,
+            )
+        };
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok((datastatus as i32, hdustatus as i32))
+        }
+    }
+
+    /// `ffgcks`. Returns `(datasum, hdusum)`.
+    pub fn get_chksum(&mut self) -> Result<(u32, u32), i32> {
+        let _g = lock();
+        let mut datasum: c_ulong = 0;
+        let mut hdusum: c_ulong = 0;
+        let mut status: c_int = 0;
+        unsafe {
+            ffgcks(
+                self.fptr,
+                &raw mut datasum,
+                &raw mut hdusum,
+                &raw mut status,
+            )
+        };
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok((datasum as u32, hdusum as u32))
+        }
+    }
+
     /// `ffclos`.
     pub fn close(mut self) -> i32 {
         let _g = lock();
@@ -1394,6 +1468,41 @@ impl Drop for CFile {
             self.fptr = std::ptr::null_mut();
         }
     }
+}
+
+/// `ffesum`.
+pub fn ffesum_str(sum: u32, complement: bool) -> String {
+    let _g = lock();
+    let mut buf = [0u8; 17];
+    unsafe {
+        ffesum(
+            sum as c_ulong,
+            i32::from(complement) as c_int,
+            buf.as_mut_ptr().cast::<c_char>(),
+        );
+    }
+    cstr_to_string(&buf)
+}
+
+/// `ffdsum`.
+pub fn ffdsum_u32(ascii: &str, complement: bool) -> u32 {
+    let _g = lock();
+    let mut buf = {
+        let mut v = CString::new(ascii)
+            .expect("ascii contains NUL")
+            .into_bytes_with_nul();
+        v.resize(17, 0);
+        v
+    };
+    let mut sum: c_ulong = 0;
+    unsafe {
+        ffdsum(
+            buf.as_mut_ptr().cast::<c_char>(),
+            i32::from(complement) as c_int,
+            &raw mut sum,
+        );
+    }
+    sum as u32
 }
 
 /// `ffd2e` text.

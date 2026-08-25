@@ -1,5 +1,6 @@
 //! [`FitsFile`]: create, open, close.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{FitsError, Result};
@@ -74,6 +75,10 @@ pub(crate) struct Inner {
     pub(crate) hdus: Vec<Hdu>,
     pub(crate) current: usize,
     pub(crate) dirty: bool,
+    /// If set, the in-memory image is gzipped to this path on close.
+    gzip_out: Option<PathBuf>,
+    /// If set, the in-memory image is written to stdout on [`FitsFile::close`].
+    emit_stdout: bool,
 }
 
 impl Inner {
@@ -126,9 +131,37 @@ impl FitsFile {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let (path, clobber) = split_clobber(path);
+        if is_stdout_name(&path) {
+            let mut f = Self::create_memory()?;
+            if let Some(inner) = f.inner.as_mut() {
+                inner.emit_stdout = true;
+            }
+            return Ok(f);
+        }
         if clobber && path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| FitsError::with_message(FILE_NOT_CREATED, e.to_string()))?;
+        }
+        if ends_with_gz(&path) {
+            if path.exists() {
+                return Err(FitsError::new(FILE_NOT_CREATED));
+            }
+            let mut io = Backend::Memory(MemoryDriver::new());
+            let hdu = Hdu::empty_primary()?;
+            let bytes = hdu.header.to_record_bytes();
+            io::write_all(&mut io, &bytes)?;
+            return Ok(Self {
+                inner: Some(Inner {
+                    io,
+                    writable: true,
+                    path: Some(path.clone()),
+                    hdus: vec![hdu],
+                    current: 0,
+                    dirty: false,
+                    gzip_out: Some(path),
+                    emit_stdout: false,
+                }),
+            });
         }
         let mut io = Backend::Disk(DiskDriver::create(&path)?);
         let hdu = Hdu::empty_primary()?;
@@ -142,6 +175,8 @@ impl FitsFile {
                 hdus: vec![hdu],
                 current: 0,
                 dirty: false,
+                gzip_out: None,
+                emit_stdout: false,
             }),
         })
     }
@@ -160,28 +195,89 @@ impl FitsFile {
                 hdus: vec![hdu],
                 current: 0,
                 dirty: false,
+                gzip_out: None,
+                emit_stdout: false,
             }),
         })
     }
 
-    /// Open an existing disk file.
-    pub fn open(path: impl AsRef<Path>, mode: AccessMode) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let writable = mode == AccessMode::ReadWrite;
-        let mut io = Backend::Disk(DiskDriver::open(&path, writable)?);
-        let bytes = io::read_all(&mut io)?;
-        if bytes.is_empty() {
+    /// Open an in-memory copy of `bytes` (stdin analogue).
+    ///
+    /// gzip-compressed buffers are decompressed when the `gzip` feature is on.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let data = maybe_gunzip(bytes)?;
+        if data.is_empty() {
             return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
         }
-        let hdus = parse_hdus(&bytes)?;
+        let hdus = parse_hdus(&data)?;
+        Ok(Self {
+            inner: Some(Inner {
+                io: Backend::Memory(MemoryDriver::from_vec(data)),
+                writable: true,
+                path: None,
+                hdus,
+                current: 0,
+                dirty: false,
+                gzip_out: None,
+                emit_stdout: false,
+            }),
+        })
+    }
+
+    /// Read a FITS file (optionally gzip-compressed) from any [`Read`] stream.
+    pub fn open_reader<R: Read>(mut reader: R) -> Result<Self> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map_err(io::map_read_err)?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Open an existing disk file.
+    ///
+    /// gzip files (`*.gz`, or gzip magic) are decompressed into memory.
+    /// If `path` is missing, `path` with a `.gz` suffix is tried (CFITSIO).
+    /// `"-"` / `"stdin"` reads the process stdin.
+    pub fn open(path: impl AsRef<Path>, mode: AccessMode) -> Result<Self> {
+        let path = path.as_ref();
+        if is_stdin_name(path) {
+            return Self::open_reader(std::io::stdin());
+        }
+        let writable = mode == AccessMode::ReadWrite;
+        let (actual, raw) = read_open_bytes(path)?;
+        if is_gzip_magic(&raw) {
+            let data = maybe_gunzip(&raw)?;
+            if data.is_empty() {
+                return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
+            }
+            let hdus = parse_hdus(&data)?;
+            let gzip_out = if writable { Some(actual.clone()) } else { None };
+            return Ok(Self {
+                inner: Some(Inner {
+                    io: Backend::Memory(MemoryDriver::from_vec(data)),
+                    writable,
+                    path: Some(actual),
+                    hdus,
+                    current: 0,
+                    dirty: false,
+                    gzip_out,
+                    emit_stdout: false,
+                }),
+            });
+        }
+        if raw.is_empty() {
+            return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
+        }
+        let hdus = parse_hdus(&raw)?;
+        let io = Backend::Disk(DiskDriver::open(&actual, writable)?);
         Ok(Self {
             inner: Some(Inner {
                 io,
                 writable,
-                path: Some(path),
+                path: Some(actual),
                 hdus,
                 current: 0,
                 dirty: false,
+                gzip_out: None,
+                emit_stdout: false,
             }),
         })
     }
@@ -189,6 +285,7 @@ impl FitsFile {
     /// Flush and close. Consumes the file.
     pub fn close(mut self) -> Result<()> {
         self.flush_inner()?;
+        self.persist_special(true)?;
         self.inner.take();
         Ok(())
     }
@@ -288,11 +385,31 @@ impl FitsFile {
         inner.io.flush()?;
         Ok(())
     }
+
+    fn persist_special(&mut self, emit_stdout: bool) -> Result<()> {
+        let gzip_out = self.inner.as_ref().and_then(|i| i.gzip_out.clone());
+        let do_stdout = emit_stdout && self.inner.as_ref().is_some_and(|i| i.emit_stdout);
+        if gzip_out.is_none() && !do_stdout {
+            return Ok(());
+        }
+        let bytes = io::read_all(&mut self.inner_mut()?.io)?;
+        if let Some(path) = gzip_out {
+            write_gzip_file(&path, &bytes)?;
+        }
+        if do_stdout {
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(io::map_write_err)?;
+            std::io::stdout().flush().map_err(io::map_write_err)?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for FitsFile {
     fn drop(&mut self) {
         let _ = self.flush_inner();
+        let _ = self.persist_special(false);
         self.inner.take();
     }
 }
@@ -386,6 +503,70 @@ fn hdu_type_from_header(header: &Header) -> HduType {
         }
     }
     HduType::Image
+}
+
+fn is_stdout_name(path: &Path) -> bool {
+    path == Path::new("-") || path == Path::new("stdout") || path == Path::new("STDOUT")
+}
+
+fn is_stdin_name(path: &Path) -> bool {
+    path == Path::new("-") || path == Path::new("stdin") || path == Path::new("STDIN")
+}
+
+fn ends_with_gz(path: &Path) -> bool {
+    path.as_os_str()
+        .to_str()
+        .is_some_and(|s| s.ends_with(".gz"))
+}
+
+fn is_gzip_magic(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+fn read_open_bytes(path: &Path) -> Result<(PathBuf, Vec<u8>)> {
+    match std::fs::read(path) {
+        Ok(b) => Ok((path.to_path_buf(), b)),
+        Err(_) => {
+            let mut gz = path.as_os_str().to_os_string();
+            gz.push(".gz");
+            let gz_path = PathBuf::from(gz);
+            let b = std::fs::read(&gz_path).map_err(io::map_open_err)?;
+            Ok((gz_path, b))
+        }
+    }
+}
+
+fn maybe_gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
+    if !is_gzip_magic(bytes) {
+        return Ok(bytes.to_vec());
+    }
+    #[cfg(feature = "gzip")]
+    {
+        crate::io::gzip::decompress(bytes)
+    }
+    #[cfg(not(feature = "gzip"))]
+    {
+        Err(FitsError::with_message(
+            FILE_NOT_OPENED,
+            "gzip support is disabled (rebuild with the gzip feature)",
+        ))
+    }
+}
+
+fn write_gzip_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(feature = "gzip")]
+    {
+        let gz = crate::io::gzip::compress(bytes)?;
+        std::fs::write(path, gz).map_err(io::map_write_err)
+    }
+    #[cfg(not(feature = "gzip"))]
+    {
+        let _ = (path, bytes);
+        Err(FitsError::with_message(
+            FILE_NOT_CREATED,
+            "gzip support is disabled (rebuild with the gzip feature)",
+        ))
+    }
 }
 
 fn split_clobber(path: &Path) -> (PathBuf, bool) {
