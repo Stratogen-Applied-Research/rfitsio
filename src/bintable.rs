@@ -7,8 +7,8 @@ use crate::hdu::Hdu;
 use crate::header::Header;
 use crate::io::{self, Driver};
 use crate::status::{
-    BAD_COL_NUM, BAD_HDU_NUM, BAD_ROW_NUM, BAD_TFIELDS, END_OF_FILE, NEG_BYTES, NOT_LOGICAL_COL,
-    NUM_OVERFLOW, ZERO_SCALE,
+    BAD_COL_NUM, BAD_ELEM_NUM, BAD_HDU_NUM, BAD_ROW_NUM, BAD_TFIELDS, END_OF_FILE, NEG_BYTES,
+    NOT_LOGICAL_COL, NUM_OVERFLOW, ZERO_SCALE,
 };
 use crate::tform::{BinaryKind, BinaryTform, VariableKind, parse_binary_tform};
 use crate::types::HduType;
@@ -110,10 +110,11 @@ impl FitsFile {
         Ok(())
     }
 
-    pub(crate) fn write_bin_col_i64(
+    pub(crate) fn write_bin_col_i64_at(
         &mut self,
         colnum: i32,
         firstrow: i64,
+        firstelem: i64,
         values: &[i64],
     ) -> Result<()> {
         self.require_write()?;
@@ -122,43 +123,47 @@ impl FitsFile {
         }
         let col = self.bin_col(colnum)?;
         if col.tform.is_variable() {
-            let bytes = encode_int_slice(values, &col)?;
-            let nelem = values.len() as i64;
-            self.write_vla_bytes(colnum, firstrow, &bytes, nelem)?;
-            return Ok(());
+            return self.write_vla_ints_at(colnum, firstrow, firstelem, values);
         }
         match col.tform.kind {
             BinaryKind::L => {
                 let flags: Vec<bool> = values.iter().map(|&v| v != 0).collect();
-                return self.write_bin_col_log(colnum, firstrow, &flags);
+                return self.write_bin_col_log_at(colnum, firstrow, firstelem, &flags);
             }
             BinaryKind::A | BinaryKind::E | BinaryKind::D | BinaryKind::C | BinaryKind::M => {
-                return self.write_bin_col_f64(
+                return self.write_bin_col_f64_at(
                     colnum,
                     firstrow,
+                    firstelem,
                     &values.iter().map(|&v| v as f64).collect::<Vec<_>>(),
                 );
             }
             BinaryKind::X => {
                 let flags: Vec<bool> = values.iter().map(|&v| v != 0).collect();
-                return self.write_bin_col_bit(colnum, firstrow, &flags);
+                return self.write_bin_col_bit_at(colnum, firstrow, firstelem, &flags);
             }
             _ => {}
         }
-        self.ensure_rows(firstrow, values.len() as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.ensure_elem_span(firstrow, firstelem, values.len() as i64, repeat)?;
+        let width = col.tform.elem_nbytes();
         let (data_start, rowlen) = self.table_geom()?;
-        for (i, &v) in values.iter().enumerate() {
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for &v in values {
             let buf = encode_int_value(v, &col)?;
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
+            let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, width);
             self.inner_mut()?.io.write_at(pos, &buf)?;
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok(())
     }
 
-    pub(crate) fn write_bin_col_u64(
+    pub(crate) fn write_bin_col_u64_at(
         &mut self,
         colnum: i32,
         firstrow: i64,
+        firstelem: i64,
         values: &[u64],
     ) -> Result<()> {
         self.require_write()?;
@@ -166,9 +171,13 @@ impl FitsFile {
             return Ok(());
         }
         let col = self.bin_col(colnum)?;
-        self.ensure_rows(firstrow, values.len() as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.ensure_elem_span(firstrow, firstelem, values.len() as i64, repeat)?;
         let (data_start, rowlen) = self.table_geom()?;
-        for (i, &v) in values.iter().enumerate() {
+        let n = col.tform.elem_nbytes().min(8);
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for &v in values {
             let stored = if col.tform.kind == BinaryKind::W {
                 v.wrapping_sub(1u64 << 63)
             } else {
@@ -176,9 +185,9 @@ impl FitsFile {
                 stored_from_physical(phys, &col)? as u64
             };
             let buf = stored.to_be_bytes();
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
-            let n = col.tform.elem_nbytes().min(8);
+            let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, n);
             self.inner_mut()?.io.write_at(pos, &buf[8 - n..])?;
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok(())
     }
@@ -187,6 +196,16 @@ impl FitsFile {
         &mut self,
         colnum: i32,
         firstrow: i64,
+        values: &[f64],
+    ) -> Result<()> {
+        self.write_bin_col_f64_at(colnum, firstrow, 1, values)
+    }
+
+    pub(crate) fn write_bin_col_f64_at(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
         values: &[f64],
     ) -> Result<()> {
         self.require_write()?;
@@ -198,29 +217,34 @@ impl FitsFile {
             return Err(FitsError::new(ZERO_SCALE));
         }
         if col.tform.is_variable() {
-            let bytes = encode_float_slice(values, &col)?;
-            self.write_vla_bytes(colnum, firstrow, &bytes, values.len() as i64)?;
-            return Ok(());
+            return self.write_vla_floats_at(colnum, firstrow, firstelem, values);
         }
-        self.ensure_rows(firstrow, values.len() as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.ensure_elem_span(firstrow, firstelem, values.len() as i64, repeat)?;
+        let width = col.tform.elem_nbytes();
         let (data_start, rowlen) = self.table_geom()?;
-        for (i, &v) in values.iter().enumerate() {
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for &v in values {
             let buf = encode_float_value(v, &col)?;
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
+            let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, width);
             self.inner_mut()?.io.write_at(pos, &buf)?;
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok(())
     }
 
-    pub(crate) fn write_bin_col_f32(
+    pub(crate) fn write_bin_col_f32_at(
         &mut self,
         colnum: i32,
         firstrow: i64,
+        firstelem: i64,
         values: &[f32],
     ) -> Result<()> {
-        self.write_bin_col_f64(
+        self.write_bin_col_f64_at(
             colnum,
             firstrow,
+            firstelem,
             &values.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(),
         )
     }
@@ -309,6 +333,16 @@ impl FitsFile {
     }
 
     fn write_bin_col_log(&mut self, colnum: i32, firstrow: i64, values: &[bool]) -> Result<()> {
+        self.write_bin_col_log_at(colnum, firstrow, 1, values)
+    }
+
+    fn write_bin_col_log_at(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[bool],
+    ) -> Result<()> {
         if values.is_empty() {
             return Ok(());
         }
@@ -324,17 +358,31 @@ impl FitsFile {
             self.write_vla_bytes(colnum, firstrow, &bytes, values.len() as i64)?;
             return Ok(());
         }
-        self.ensure_rows(firstrow, values.len() as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.ensure_elem_span(firstrow, firstelem, values.len() as i64, repeat)?;
         let (data_start, rowlen) = self.table_geom()?;
-        for (i, &v) in values.iter().enumerate() {
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for &v in values {
             let b = [if v { b'T' } else { b'F' }];
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
+            let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, 1);
             self.inner_mut()?.io.write_at(pos, &b)?;
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok(())
     }
 
     fn write_bin_col_bit(&mut self, colnum: i32, firstrow: i64, values: &[bool]) -> Result<()> {
+        self.write_bin_col_bit_at(colnum, firstrow, 1, values)
+    }
+
+    fn write_bin_col_bit_at(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[bool],
+    ) -> Result<()> {
         if values.is_empty() {
             return Ok(());
         }
@@ -353,12 +401,20 @@ impl FitsFile {
             self.write_vla_bytes(colnum, firstrow, &bytes, values.len() as i64)?;
             return Ok(());
         }
-        self.ensure_rows(firstrow, values.len() as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.ensure_elem_span(firstrow, firstelem, values.len() as i64, repeat)?;
         let (data_start, rowlen) = self.table_geom()?;
-        for (i, &v) in values.iter().enumerate() {
-            let b = [if v { 0x80u8 } else { 0 }];
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
-            self.inner_mut()?.io.write_at(pos, &b)?;
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for &v in values {
+            if col.tform.kind == BinaryKind::X {
+                self.write_one_bit(data_start, rowlen, col.offset, row, elem, v)?;
+            } else {
+                let b = [u8::from(v)];
+                let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, 1);
+                self.inner_mut()?.io.write_at(pos, &b)?;
+            }
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok(())
     }
@@ -410,10 +466,11 @@ impl FitsFile {
         Ok((out, false))
     }
 
-    pub(crate) fn read_bin_col_i64(
+    pub(crate) fn read_bin_col_i64_at(
         &mut self,
         colnum: i32,
         firstrow: i64,
+        firstelem: i64,
         nelem: usize,
         nulval: Option<i64>,
     ) -> Result<(Vec<i64>, bool)> {
@@ -421,16 +478,20 @@ impl FitsFile {
         if col.tform.is_variable() {
             let bytes = self.read_vla_bytes(colnum, firstrow)?;
             let vals = decode_int_slice(&bytes, &col)?;
-            let take = nelem.min(vals.len());
-            return Ok((vals[..take].to_vec(), false));
+            let start = (firstelem.max(1) as usize).saturating_sub(1);
+            let end = (start + nelem).min(vals.len());
+            return Ok((vals.get(start..end).unwrap_or(&[]).to_vec(), false));
         }
-        self.check_read_rows(firstrow, nelem as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.check_elem_span(firstrow, firstelem, nelem as i64, repeat)?;
         let (data_start, rowlen) = self.table_geom()?;
         let width = col.tform.elem_nbytes();
         let mut out = Vec::with_capacity(nelem);
         let mut anynul = false;
-        for i in 0..nelem {
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for _ in 0..nelem {
+            let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, width);
             let mut buf = vec![0u8; width];
             let n = self.inner_mut()?.io.read_at(pos, &mut buf)?;
             if n < width {
@@ -441,10 +502,12 @@ impl FitsFile {
                 if stored == tn {
                     anynul = true;
                     out.push(nv);
+                    advance_elem(&mut row, &mut elem, repeat);
                     continue;
                 }
             }
             out.push(physical_from_stored(stored, &col)?);
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok((out, anynul))
     }
@@ -456,25 +519,41 @@ impl FitsFile {
         nelem: usize,
         _nulval: Option<f64>,
     ) -> Result<(Vec<f64>, bool)> {
+        self.read_bin_col_f64_at(colnum, firstrow, 1, nelem, _nulval)
+    }
+
+    pub(crate) fn read_bin_col_f64_at(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        nelem: usize,
+        _nulval: Option<f64>,
+    ) -> Result<(Vec<f64>, bool)> {
         let col = self.bin_col(colnum)?;
         if col.tform.is_variable() {
             let bytes = self.read_vla_bytes(colnum, firstrow)?;
             let vals = decode_float_slice(&bytes, &col)?;
-            let take = nelem.min(vals.len());
-            return Ok((vals[..take].to_vec(), false));
+            let start = (firstelem.max(1) as usize).saturating_sub(1);
+            let end = (start + nelem).min(vals.len());
+            return Ok((vals.get(start..end).unwrap_or(&[]).to_vec(), false));
         }
-        self.check_read_rows(firstrow, nelem as i64)?;
+        let repeat = col.tform.repeat.max(1);
+        self.check_elem_span(firstrow, firstelem, nelem as i64, repeat)?;
         let (data_start, rowlen) = self.table_geom()?;
         let width = col.tform.elem_nbytes();
         let mut out = Vec::with_capacity(nelem);
-        for i in 0..nelem {
-            let pos = data_start + ((firstrow - 1 + i as i64) as u64) * rowlen + col.offset;
+        let mut row = firstrow;
+        let mut elem = firstelem;
+        for _ in 0..nelem {
+            let pos = elem_file_pos(data_start, rowlen, col.offset, row, elem, width);
             let mut buf = vec![0u8; width];
             let n = self.inner_mut()?.io.read_at(pos, &mut buf)?;
             if n < width {
                 return Err(FitsError::new(END_OF_FILE));
             }
             out.push(decode_float_value(&buf, &col)?);
+            advance_elem(&mut row, &mut elem, repeat);
         }
         Ok((out, false))
     }
@@ -701,6 +780,123 @@ impl FitsFile {
         }
     }
 
+    fn ensure_elem_span(
+        &mut self,
+        firstrow: i64,
+        firstelem: i64,
+        nvalues: i64,
+        repeat: i64,
+    ) -> Result<()> {
+        if firstrow < 1 {
+            return Err(FitsError::new(BAD_ROW_NUM));
+        }
+        if firstelem < 1 || (repeat > 0 && firstelem > repeat) {
+            return Err(FitsError::new(BAD_ELEM_NUM));
+        }
+        if nvalues <= 0 {
+            return Ok(());
+        }
+        let start = (firstrow - 1) * repeat + (firstelem - 1);
+        let last_row = (start + nvalues - 1) / repeat + 1;
+        self.ensure_rows(1, last_row)
+    }
+
+    fn check_elem_span(
+        &self,
+        firstrow: i64,
+        firstelem: i64,
+        nvalues: i64,
+        repeat: i64,
+    ) -> Result<()> {
+        if firstrow < 1 {
+            return Err(FitsError::new(BAD_ROW_NUM));
+        }
+        if firstelem < 1 || (repeat > 0 && firstelem > repeat) {
+            return Err(FitsError::new(BAD_ELEM_NUM));
+        }
+        if nvalues < 0 {
+            return Err(FitsError::new(NEG_BYTES));
+        }
+        if nvalues == 0 {
+            return Ok(());
+        }
+        let start = (firstrow - 1) * repeat + (firstelem - 1);
+        let last_row = (start + nvalues - 1) / repeat + 1;
+        if last_row > self.nrows()? {
+            return Err(FitsError::new(BAD_ELEM_NUM));
+        }
+        Ok(())
+    }
+
+    fn write_vla_ints_at(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[i64],
+    ) -> Result<()> {
+        let col = self.bin_col(colnum)?;
+        if firstelem <= 1 {
+            let bytes = encode_int_slice(values, &col)?;
+            return self.write_vla_bytes(colnum, firstrow, &bytes, values.len() as i64);
+        }
+        let bytes = self.read_vla_bytes(colnum, firstrow)?;
+        let mut vals = decode_int_slice(&bytes, &col)?;
+        let start = (firstelem as usize).saturating_sub(1);
+        if vals.len() < start + values.len() {
+            vals.resize(start + values.len(), 0);
+        }
+        vals[start..start + values.len()].copy_from_slice(values);
+        let out = encode_int_slice(&vals, &col)?;
+        self.write_vla_bytes(colnum, firstrow, &out, vals.len() as i64)
+    }
+
+    fn write_vla_floats_at(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[f64],
+    ) -> Result<()> {
+        let col = self.bin_col(colnum)?;
+        if firstelem <= 1 {
+            let bytes = encode_float_slice(values, &col)?;
+            return self.write_vla_bytes(colnum, firstrow, &bytes, values.len() as i64);
+        }
+        let bytes = self.read_vla_bytes(colnum, firstrow)?;
+        let mut vals = decode_float_slice(&bytes, &col)?;
+        let start = (firstelem as usize).saturating_sub(1);
+        if vals.len() < start + values.len() {
+            vals.resize(start + values.len(), 0.0);
+        }
+        vals[start..start + values.len()].copy_from_slice(values);
+        let out = encode_float_slice(&vals, &col)?;
+        self.write_vla_bytes(colnum, firstrow, &out, vals.len() as i64)
+    }
+
+    fn write_one_bit(
+        &mut self,
+        data_start: u64,
+        rowlen: u64,
+        col_off: u64,
+        row: i64,
+        elem: i64,
+        on: bool,
+    ) -> Result<()> {
+        let bit_index = elem - 1;
+        let byte_off = (bit_index / 8) as u64;
+        let shift = 7 - (bit_index % 8);
+        let pos = data_start + ((row - 1) as u64) * rowlen + col_off + byte_off;
+        let mut b = [0u8];
+        let _ = self.inner_mut()?.io.read_at(pos, &mut b)?;
+        if on {
+            b[0] |= 1 << shift;
+        } else {
+            b[0] &= !(1 << shift);
+        }
+        self.inner_mut()?.io.write_at(pos, &b)
+    }
+
     fn bin_col(&self, colnum: i32) -> Result<BinCol> {
         self.require_table()?;
         let inner = self.inner()?;
@@ -731,6 +927,25 @@ impl FitsFile {
             tzero,
             tnull,
         })
+    }
+}
+
+fn elem_file_pos(
+    data_start: u64,
+    rowlen: u64,
+    col_off: u64,
+    row: i64,
+    elem: i64,
+    elem_nbytes: usize,
+) -> u64 {
+    data_start + ((row - 1) as u64) * rowlen + col_off + ((elem - 1) as u64) * elem_nbytes as u64
+}
+
+fn advance_elem(row: &mut i64, elem: &mut i64, repeat: i64) {
+    *elem += 1;
+    if *elem > repeat {
+        *elem = 1;
+        *row += 1;
     }
 }
 

@@ -32,7 +32,8 @@ Layer A (core I/O) and Layer B (tiled image compression) are implemented:
 - gzip `.gz` read/write (pure-Rust `flate2`), stdin/stdout and `write_hdu_to` streams
 - Cookbook example (`cargo run --example cookbook`) matching CFITSIO `cookbook.out`
 - `testprog` gate: checksum encode/decode, WCS `-TAN`, missing-file and HDU-move status codes locked to `testprog.out`
-- Tiled compressed images (`ZIMAGE`): `RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1`, `HCOMPRESS_1`, lossless float gzip (`ZQUANTIZ=NONE`), and quantized floats with subtractive dither. Pixel identity after funpack / CFITSIO `fits_read_img` is the gate.
+- Tiled compressed images (`ZIMAGE`): `RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1`, `HCOMPRESS_1`, lossless float gzip (`ZQUANTIZ=NONE`), and quantized floats with subtractive dither. Pixel identity after funpack / CFITSIO `fits_read_img` is the gate
+- Binary-table vector cells (`firstrow` / `firstelem` / `nelem`, CFITSIO flattened order), `TDIMn` parse/write and Fortran-order indexing, PSRFITS `NBIT` 1/2/4/8 pack/unpack. See `docs/psrfits.md`.
 
 ## Development
 

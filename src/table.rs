@@ -7,9 +7,9 @@ use crate::hdu::Hdu;
 use crate::header::{COMM_TBCOL_INSERTED, COMM_TFORM_INSERTED, COMM_TTYPE_INSERTED, Header};
 use crate::io::{self, Driver};
 use crate::status::{
-    BAD_ATABLE_FORMAT, BAD_COL_NUM, BAD_HDU_NUM, BAD_ROW_NUM, BAD_TFIELDS, COL_NOT_FOUND,
-    COL_NOT_UNIQUE, HEADER_NOT_EMPTY, NEG_BYTES, NOT_ASCII_COL, NOT_TABLE, NUM_OVERFLOW,
-    ZERO_SCALE,
+    BAD_ATABLE_FORMAT, BAD_COL_NUM, BAD_ELEM_NUM, BAD_HDU_NUM, BAD_ROW_NUM, BAD_TFIELDS,
+    COL_NOT_FOUND, COL_NOT_UNIQUE, HEADER_NOT_EMPTY, NEG_BYTES, NOT_ASCII_COL, NOT_TABLE,
+    NUM_OVERFLOW, ZERO_SCALE,
 };
 use crate::tform::{
     AsciiKind, AsciiTform, field_is_null, format_ascii_number, format_ascii_string,
@@ -195,37 +195,93 @@ impl FitsFile {
     }
 
     /// Write integer values; formatted with the column TFORM (`I`/`F`/`E`/`D`).
+    ///
+    /// Binary vector columns use CFITSIO flattened-element order (`firstelem = 1`).
     pub fn write_col_i64(&mut self, colnum: i32, firstrow: i64, values: &[i64]) -> Result<()> {
-        if self.hdu_type()? == HduType::BinaryTable {
-            return self.write_bin_col_i64(colnum, firstrow, values);
+        self.write_col_i64_elem(colnum, firstrow, 1, values)
+    }
+
+    /// `fits_write_col` with explicit 1-based `firstelem` in a vector cell.
+    pub fn write_col_i64_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[i64],
+    ) -> Result<()> {
+        if self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable {
+            return self.write_bin_col_i64_at(colnum, firstrow, firstelem, values);
+        }
+        if firstelem != 1 {
+            return Err(FitsError::new(BAD_ELEM_NUM));
         }
         self.write_col_numbers(colnum, firstrow, values.iter().map(|&v| v as f64))
     }
 
     /// Write unsigned 64-bit values (binary `K`/`W` columns).
     pub fn write_col_u64(&mut self, colnum: i32, firstrow: i64, values: &[u64]) -> Result<()> {
-        if self.hdu_type()? == HduType::BinaryTable {
-            return self.write_bin_col_u64(colnum, firstrow, values);
+        self.write_col_u64_elem(colnum, firstrow, 1, values)
+    }
+
+    /// Write unsigned 64-bit values starting at 1-based `firstelem`.
+    pub fn write_col_u64_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[u64],
+    ) -> Result<()> {
+        if self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable {
+            return self.write_bin_col_u64_at(colnum, firstrow, firstelem, values);
         }
-        self.write_col_i64(
+        self.write_col_i64_elem(
             colnum,
             firstrow,
+            firstelem,
             &values.iter().map(|&v| v as i64).collect::<Vec<_>>(),
         )
     }
 
     /// Write `f32` values.
     pub fn write_col_f32(&mut self, colnum: i32, firstrow: i64, values: &[f32]) -> Result<()> {
-        if self.hdu_type()? == HduType::BinaryTable {
-            return self.write_bin_col_f32(colnum, firstrow, values);
+        self.write_col_f32_elem(colnum, firstrow, 1, values)
+    }
+
+    /// Write `f32` values starting at 1-based `firstelem`.
+    pub fn write_col_f32_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[f32],
+    ) -> Result<()> {
+        if self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable {
+            return self.write_bin_col_f32_at(colnum, firstrow, firstelem, values);
+        }
+        if firstelem != 1 {
+            return Err(FitsError::new(BAD_ELEM_NUM));
         }
         self.write_col_numbers(colnum, firstrow, values.iter().map(|&v| f64::from(v)))
     }
 
     /// Write `f64` values.
     pub fn write_col_f64(&mut self, colnum: i32, firstrow: i64, values: &[f64]) -> Result<()> {
-        if self.hdu_type()? == HduType::BinaryTable {
-            return self.write_bin_col_f64(colnum, firstrow, values);
+        self.write_col_f64_elem(colnum, firstrow, 1, values)
+    }
+
+    /// Write `f64` values starting at 1-based `firstelem`.
+    pub fn write_col_f64_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        values: &[f64],
+    ) -> Result<()> {
+        if self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable {
+            return self.write_bin_col_f64_at(colnum, firstrow, firstelem, values);
+        }
+        if firstelem != 1 {
+            return Err(FitsError::new(BAD_ELEM_NUM));
         }
         self.write_col_numbers(colnum, firstrow, values.iter().copied())
     }
@@ -280,8 +336,23 @@ impl FitsFile {
         nelem: usize,
         nulval: Option<i64>,
     ) -> Result<(Vec<i64>, bool)> {
-        if self.hdu_type()? == HduType::BinaryTable {
-            return self.read_bin_col_i64(colnum, firstrow, nelem, nulval);
+        self.read_col_i64_elem(colnum, firstrow, 1, nelem, nulval)
+    }
+
+    /// Read integers starting at 1-based `firstelem` in a vector cell.
+    pub fn read_col_i64_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        nelem: usize,
+        nulval: Option<i64>,
+    ) -> Result<(Vec<i64>, bool)> {
+        if self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable {
+            return self.read_bin_col_i64_at(colnum, firstrow, firstelem, nelem, nulval);
+        }
+        if firstelem != 1 {
+            return Err(FitsError::new(BAD_ELEM_NUM));
         }
         let (vals, anynul) =
             self.read_col_f64(colnum, firstrow, nelem, nulval.map(|v| v as f64))?;
@@ -304,7 +375,20 @@ impl FitsFile {
         nelem: usize,
         nulval: Option<f32>,
     ) -> Result<(Vec<f32>, bool)> {
-        let (vals, anynul) = self.read_col_f64(colnum, firstrow, nelem, nulval.map(f64::from))?;
+        self.read_col_f32_elem(colnum, firstrow, 1, nelem, nulval)
+    }
+
+    /// Read `f32` values starting at 1-based `firstelem`.
+    pub fn read_col_f32_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        nelem: usize,
+        nulval: Option<f32>,
+    ) -> Result<(Vec<f32>, bool)> {
+        let (vals, anynul) =
+            self.read_col_f64_elem(colnum, firstrow, firstelem, nelem, nulval.map(f64::from))?;
         Ok((vals.into_iter().map(|v| v as f32).collect(), anynul))
     }
 
@@ -316,8 +400,23 @@ impl FitsFile {
         nelem: usize,
         nulval: Option<f64>,
     ) -> Result<(Vec<f64>, bool)> {
-        if self.hdu_type()? == HduType::BinaryTable {
-            return self.read_bin_col_f64(colnum, firstrow, nelem, nulval);
+        self.read_col_f64_elem(colnum, firstrow, 1, nelem, nulval)
+    }
+
+    /// Read `f64` values starting at 1-based `firstelem` in a vector cell.
+    pub fn read_col_f64_elem(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        firstelem: i64,
+        nelem: usize,
+        nulval: Option<f64>,
+    ) -> Result<(Vec<f64>, bool)> {
+        if self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable {
+            return self.read_bin_col_f64_at(colnum, firstrow, firstelem, nelem, nulval);
+        }
+        if firstelem != 1 {
+            return Err(FitsError::new(BAD_ELEM_NUM));
         }
         if nelem == 0 {
             return Ok((Vec::new(), false));

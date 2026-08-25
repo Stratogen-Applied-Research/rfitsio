@@ -387,6 +387,21 @@ unsafe extern "C" {
         dims: *mut c_long,
         status: *mut c_int,
     ) -> c_int;
+    fn ffptdm(
+        fptr: *mut c_void,
+        colnum: c_int,
+        naxis: c_int,
+        naxes: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgtdm(
+        fptr: *mut c_void,
+        colnum: c_int,
+        maxdim: c_int,
+        naxis: *mut c_int,
+        naxes: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
 }
 
 pub const ASCII_TBL: c_int = 1;
@@ -1409,6 +1424,53 @@ impl CFile {
             Err(status as i32)
         } else {
             Ok(anynul as i32)
+        }
+    }
+
+    /// `ffptdm`.
+    pub fn write_tdim(&mut self, colnum: i32, dims: &[i64]) -> i32 {
+        let _g = lock();
+        let mut axes: Vec<c_long> = dims.iter().map(|&n| n as c_long).collect();
+        let mut status: c_int = 0;
+        unsafe {
+            ffptdm(
+                self.fptr,
+                colnum as c_int,
+                dims.len() as c_int,
+                axes.as_mut_ptr(),
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffgtdm`.
+    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+    pub fn read_tdim(&mut self, colnum: i32, maxdim: i32) -> Result<(i32, Vec<i64>), i32> {
+        let _g = lock();
+        let mut naxis: c_int = 0;
+        let mut axes = vec![0 as c_long; maxdim.max(1) as usize];
+        let mut status: c_int = 0;
+        unsafe {
+            ffgtdm(
+                self.fptr,
+                colnum as c_int,
+                maxdim as c_int,
+                &raw mut naxis,
+                axes.as_mut_ptr(),
+                &raw mut status,
+            )
+        };
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok((
+                naxis as i32,
+                axes.into_iter()
+                    .take(naxis as usize)
+                    .map(|v| v as i64)
+                    .collect(),
+            ))
         }
     }
 

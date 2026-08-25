@@ -21,8 +21,10 @@ pub mod header;
 pub mod image;
 pub mod io;
 pub mod keys;
+pub mod nbit;
 pub mod status;
 pub mod table;
+pub mod tdim;
 pub mod tform;
 pub mod types;
 pub mod wcs;
@@ -47,8 +49,12 @@ pub use file::{
 pub use header::{AsciiTableInfo, BinaryTableInfo, Header, PrimaryInfo};
 pub use image::{Pixel, fits_create_img, fits_read_img, fits_write_img};
 pub use keys::{fits_read_key_str, fits_write_date, fits_write_key_str};
+pub use nbit::{pack_samples, samples_per_byte, unpack_samples};
 pub use status::{fits_get_errstatus, status_text};
 pub use table::{fits_create_tbl, fits_movabs_hdu};
+pub use tdim::{
+    decode_tdim, fits_read_tdim, fits_write_tdim, format_tdim, tdim_coords, tdim_elem, tdim_product,
+};
 pub use tform::{
     AsciiKind, AsciiTform, BinaryKind, BinaryTform, VariableKind, ascii_column_starts,
     binary_column_offsets, parse_ascii_tform, parse_binary_tform,
