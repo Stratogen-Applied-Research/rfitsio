@@ -9,6 +9,10 @@
 
 pub mod card;
 pub mod error;
+pub mod file;
+pub mod hdu;
+pub mod header;
+pub mod io;
 pub mod status;
 pub mod types;
 
@@ -17,6 +21,10 @@ pub use card::{
     make_card_string,
 };
 pub use error::{FitsError, Result};
+pub use file::{
+    AccessMode, FitsFile, fits_close_file, fits_create_file, fits_create_memfile, fits_open_file,
+};
+pub use header::Header;
 pub use status::{fits_get_errstatus, status_text};
 pub use types::{
     CARD_LEN, CFITSIO_MAJOR, CFITSIO_MICRO, CFITSIO_MINOR, HduType, KeyClass, RECORD_LEN,

@@ -5,7 +5,7 @@
 
 #![allow(non_camel_case_types)]
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
 
 pub const FLEN_CARD: usize = 81;
 pub const FLEN_VALUE: usize = 71;
@@ -37,6 +37,22 @@ unsafe extern "C" {
         card: *mut c_char,
         name: *mut c_char,
         length: *mut c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffinit(fptr: *mut *mut c_void, filename: *const c_char, status: *mut c_int) -> c_int;
+    fn ffclos(fptr: *mut c_void, status: *mut c_int) -> c_int;
+    fn ffphps(
+        fptr: *mut c_void,
+        bitpix: c_int,
+        naxis: c_int,
+        naxes: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
+    #[allow(dead_code)]
+    fn ffopen(
+        fptr: *mut *mut c_void,
+        filename: *const c_char,
+        iomode: c_int,
         status: *mut c_int,
     ) -> c_int;
 }
@@ -168,4 +184,49 @@ pub fn ffgknm_str(card: &str) -> (String, i32, i32) {
         );
     }
     (cstr_to_string(&name), length as i32, status as i32)
+}
+
+/// `fits_create_file` + `fits_write_imghdr`(BITPIX=8, NAXIS=0) + `fits_close_file`.
+///
+/// This is CFITSIO's standard empty primary array: SIMPLE/BITPIX/NAXIS/EXTEND
+/// plus the two FITS-definition COMMENT cards, END, and space fill to 2880.
+pub fn write_empty_primary(path: &str) -> Result<(), i32> {
+    let cpath = CString::new(path).map_err(|_| 105)?;
+    let mut fptr: *mut c_void = std::ptr::null_mut();
+    let mut status: c_int = 0;
+    unsafe {
+        ffinit(&raw mut fptr, cpath.as_ptr(), &raw mut status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        ffphps(fptr, 8, 0, std::ptr::null_mut(), &raw mut status);
+        let mut close_status = status;
+        ffclos(fptr, &raw mut close_status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        if close_status != 0 {
+            return Err(close_status as i32);
+        }
+    }
+    Ok(())
+}
+
+/// `fits_create_file` + `fits_close_file` with no keywords written.
+pub fn create_and_close(path: &str) -> Result<(), i32> {
+    let cpath = CString::new(path).map_err(|_| 105)?;
+    let mut fptr: *mut c_void = std::ptr::null_mut();
+    let mut status: c_int = 0;
+    unsafe {
+        ffinit(&raw mut fptr, cpath.as_ptr(), &raw mut status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        ffclos(fptr, &raw mut status);
+    }
+    if status != 0 {
+        Err(status as i32)
+    } else {
+        Ok(())
+    }
 }
