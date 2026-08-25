@@ -1,10 +1,13 @@
 //! In-memory header: a sequence of 80-byte cards plus record padding.
 
 use crate::card::{
-    Card, format_fixed_double, format_string_value, make_card_string, parse_value_comment,
+    Card, format_complex_exp, format_complex_fixed, format_exp_double, format_fixed_double,
+    format_string_value, make_card_string, parse_value_comment, unquote_fits_string,
 };
 use crate::error::{FitsError, Result};
-use crate::status::{BAD_BITPIX, BAD_KEYCHAR, BAD_NAXIS, KEY_NO_EXIST, NEG_AXIS, NO_END};
+use crate::status::{
+    BAD_BITPIX, BAD_KEYCHAR, BAD_NAXIS, KEY_NO_EXIST, KEY_OUT_BOUNDS, NEG_AXIS, NO_END,
+};
 use crate::types::{CARD_LEN, ImageType, RECORD_LEN};
 
 /// CFITSIO `ffphpr` self-documenting COMMENT cards (primary array).
@@ -27,6 +30,25 @@ pub const COMM_BZERO_ULONG: &str = "offset data range to that of unsigned long";
 pub const COMM_BZERO_SBYTE: &str = "offset data range to that of signed byte";
 pub const BZERO_ULONGLONG_CARD: &str =
     "BZERO   =  9223372036854775808 / offset data range to that of unsigned long long";
+
+/// Result of [`Header::primary_info`] (`ffghpr`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimaryInfo {
+    /// SIMPLE.
+    pub simple: bool,
+    /// BITPIX.
+    pub bitpix: i32,
+    /// NAXIS.
+    pub naxis: i32,
+    /// NAXISn.
+    pub naxes: Vec<i64>,
+    /// PCOUNT (0 if absent).
+    pub pcount: i64,
+    /// GCOUNT (1 if absent).
+    pub gcount: i64,
+    /// EXTEND (false if absent).
+    pub extend: bool,
+}
 
 /// Ordered list of header cards, without the END card or fill.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -249,6 +271,276 @@ impl Header {
             self.cards.push(card);
         }
         Ok(())
+    }
+
+    /// `fits_write_key_flt` / `ffpkye` (exponential).
+    pub fn write_float_exp(
+        &mut self,
+        name: &str,
+        value: f64,
+        decim: usize,
+        comm: Option<&str>,
+    ) -> Result<()> {
+        let v = format_exp_double(value, decim);
+        self.push_made(name, &v, comm)
+    }
+
+    /// `fits_write_key_null` / `ffpkyu`.
+    pub fn write_null(&mut self, name: &str, comm: Option<&str>) -> Result<()> {
+        self.push_made(name, " ", comm)
+    }
+
+    /// `fits_write_comment` / `ffpcom`.
+    pub fn write_comment(&mut self, comm: &str) {
+        for chunk in comm.as_bytes().chunks(72) {
+            let mut card = String::from("COMMENT ");
+            card.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+            self.cards.push(Card::from_text(&card));
+        }
+    }
+
+    /// `fits_write_history` / `ffphis`.
+    pub fn write_history(&mut self, hist: &str) {
+        for chunk in hist.as_bytes().chunks(72) {
+            let mut card = String::from("HISTORY ");
+            card.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+            self.cards.push(Card::from_text(&card));
+        }
+    }
+
+    /// `fits_write_record` / `ffprec`.
+    pub fn write_record(&mut self, card: &str) {
+        self.cards.push(Card::from_text(card));
+    }
+
+    /// Complex exponential (`ffpkyc` / `ffpkym`).
+    pub fn write_complex_exp(
+        &mut self,
+        name: &str,
+        real: f64,
+        imag: f64,
+        decim: usize,
+        comm: Option<&str>,
+    ) -> Result<()> {
+        let v = format_complex_exp(real, imag, decim);
+        self.push_made(name, &v, comm)
+    }
+
+    /// Complex fixed (`ffpkfc` / `ffpkfm`).
+    pub fn write_complex_fixed(
+        &mut self,
+        name: &str,
+        real: f64,
+        imag: f64,
+        decim: usize,
+        comm: Option<&str>,
+    ) -> Result<()> {
+        let v = format_complex_fixed(real, imag, decim);
+        self.push_made(name, &v, comm)
+    }
+
+    /// Unsigned 64-bit integer keyword.
+    pub fn write_ulong(&mut self, name: &str, value: u64, comm: Option<&str>) -> Result<()> {
+        self.push_made(name, &value.to_string(), comm)
+    }
+
+    fn push_made(&mut self, name: &str, value: &str, comm: Option<&str>) -> Result<()> {
+        let s = make_card_string(name, value, comm)?;
+        self.cards.push(Card::from_text(&s));
+        Ok(())
+    }
+
+    /// 1-based keyword record (`fits_read_record`). Does not include END.
+    pub fn record(&self, n: usize) -> Result<Card> {
+        self.cards
+            .get(n.wrapping_sub(1))
+            .copied()
+            .ok_or_else(|| FitsError::new(KEY_OUT_BOUNDS))
+    }
+
+    /// Unquoted string value (`fits_read_key_str`).
+    pub fn get_string(&self, name: &str) -> Result<(String, String)> {
+        let (val, comm) = self.raw_value_comment(name)?;
+        Ok((unquote_fits_string(&val), comm))
+    }
+
+    /// Logical value (`fits_read_key_log`).
+    pub fn get_logical(&self, name: &str) -> Result<(bool, String)> {
+        let (val, comm) = self.raw_value_comment(name)?;
+        let v = val.trim();
+        match v.as_bytes().first() {
+            Some(b'T' | b't') => Ok((true, comm)),
+            Some(b'F' | b'f') => Ok((false, comm)),
+            _ => Err(FitsError::new(crate::status::BAD_LOGICALKEY)),
+        }
+    }
+
+    /// Raw value + comment strings (`fits_read_keyword`).
+    pub fn raw_value_comment(&self, name: &str) -> Result<(String, String)> {
+        let card = self
+            .card_by_name(name)
+            .ok_or_else(|| FitsError::new(KEY_NO_EXIST))?;
+        parse_value_comment(card.as_str().unwrap_or(""))
+    }
+
+    /// Units from `[...]` in the comment (`fits_read_key_unit`).
+    pub fn get_unit(&self, name: &str) -> Result<String> {
+        let (_, comm) = self.raw_value_comment(name)?;
+        if let Some(rest) = comm.strip_prefix('[') {
+            if let Some(end) = rest.find(']') {
+                return Ok(rest[..end].to_string());
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// Prepend `[unit] ` to the comment (`fits_write_key_unit`).
+    pub fn set_unit(&mut self, name: &str, unit: &str) -> Result<()> {
+        let card = *self
+            .card_by_name(name)
+            .ok_or_else(|| FitsError::new(KEY_NO_EXIST))?;
+        let text = card.as_str().unwrap_or("");
+        let (val, oldcomm) = parse_value_comment(text)?;
+        let rest = if let Some(stripped) = oldcomm.strip_prefix('[') {
+            if let Some(idx) = stripped.find(']') {
+                stripped[idx + 1..].trim_start().to_string()
+            } else {
+                oldcomm
+            }
+        } else {
+            oldcomm
+        };
+        let newcomm = if unit.is_empty() {
+            rest
+        } else {
+            let mut c = format!("[{unit}] ");
+            c.push_str(&rest);
+            c
+        };
+        let s = make_card_string(name, &val, Some(&newcomm))?;
+        self.replace_name(name, Card::from_text(&s))?;
+        Ok(())
+    }
+
+    /// Update: replace if present, otherwise append (`fits_update_key`).
+    pub fn update_with(&mut self, name: &str, value: &str, comm: Option<&str>) -> Result<()> {
+        let s = make_card_string(name, value, comm)?;
+        let card = Card::from_text(&s);
+        if self.card_by_name(name).is_some() {
+            self.replace_name(name, card)
+        } else {
+            self.cards.push(card);
+            Ok(())
+        }
+    }
+
+    /// Modify an existing keyword; error if missing (`fits_modify_key`).
+    pub fn modify_with(&mut self, name: &str, value: &str, comm: Option<&str>) -> Result<()> {
+        let s = make_card_string(name, value, comm)?;
+        self.replace_name(name, Card::from_text(&s))
+    }
+
+    /// Insert `card` at 1-based `pos` (before that record). `pos > nkeys`
+    /// appends.
+    pub fn insert_record_at(&mut self, pos: usize, card: Card) -> Result<()> {
+        let idx = pos.saturating_sub(1);
+        if idx >= self.cards.len() {
+            self.cards.push(card);
+        } else {
+            self.cards.insert(idx, card);
+        }
+        Ok(())
+    }
+
+    /// Delete first keyword with this name (`fits_delete_key`).
+    pub fn delete_key(&mut self, name: &str) -> Result<()> {
+        let key = name8(name);
+        let idx = self
+            .cards
+            .iter()
+            .position(|c| name8_bytes(&c.as_bytes()[..8]) == key)
+            .ok_or_else(|| FitsError::new(KEY_NO_EXIST))?;
+        self.cards.remove(idx);
+        Ok(())
+    }
+
+    /// Delete 1-based record (`fits_delete_record`).
+    pub fn delete_record(&mut self, n: usize) -> Result<()> {
+        let idx = n.wrapping_sub(1);
+        if idx >= self.cards.len() {
+            return Err(FitsError::new(KEY_OUT_BOUNDS));
+        }
+        self.cards.remove(idx);
+        Ok(())
+    }
+
+    /// Replace first matching name.
+    pub fn replace_name(&mut self, name: &str, card: Card) -> Result<()> {
+        let key = name8(name);
+        let idx = self
+            .cards
+            .iter()
+            .position(|c| name8_bytes(&c.as_bytes()[..8]) == key)
+            .ok_or_else(|| FitsError::new(KEY_NO_EXIST))?;
+        self.cards[idx] = card;
+        Ok(())
+    }
+
+    /// Write DATE with the given timestamp value (`fits_write_date` body).
+    pub fn write_date_value(&mut self, datetime: &str) -> Result<()> {
+        let comm = "file creation date (YYYY-MM-DDThh:mm:ss UT)";
+        let v = format_string_value(datetime);
+        self.update_with("DATE", &v, Some(comm))
+    }
+
+    /// `fits_write_keys_lng`: KEY1, KEY2, ... from `start`.
+    pub fn write_keys_long(
+        &mut self,
+        root: &str,
+        start: i32,
+        values: &[i64],
+        comms: &[Option<&str>],
+    ) -> Result<()> {
+        for (i, val) in values.iter().enumerate() {
+            let name = format!("{root}{}", start as usize + i);
+            let comm = comms.get(i).copied().flatten();
+            self.write_long(&name, *val, comm)?;
+        }
+        Ok(())
+    }
+
+    /// Read KEY{start}.. as integers. Returns how many were found.
+    pub fn get_keys_long(&self, root: &str, start: i32, nmax: usize) -> (Vec<i64>, usize) {
+        let mut out = Vec::new();
+        for i in 0..nmax {
+            let name = format!("{root}{}", start as usize + i);
+            match self.get_i64(&name) {
+                Ok(v) => out.push(v),
+                Err(_) => break,
+            }
+        }
+        let n = out.len();
+        (out, n)
+    }
+
+    /// Primary-array required keywords (`fits_read_imghdr` / `ffghpr`).
+    pub fn primary_info(&self) -> Result<PrimaryInfo> {
+        let simple = self.get_logical("SIMPLE").map(|(v, _)| v).unwrap_or(true);
+        let bitpix = self.bitpix()?;
+        let naxes = self.naxes()?;
+        let naxis = naxes.len() as i32;
+        let pcount = self.get_i64("PCOUNT").unwrap_or(0);
+        let gcount = self.get_i64("GCOUNT").unwrap_or(1);
+        let extend = self.get_logical("EXTEND").map(|(v, _)| v).unwrap_or(false);
+        Ok(PrimaryInfo {
+            simple,
+            bitpix,
+            naxis,
+            naxes,
+            pcount,
+            gcount,
+            extend,
+        })
     }
 
     /// Infer [`ImageType`] from BITPIX + BZERO.

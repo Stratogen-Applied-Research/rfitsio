@@ -12,7 +12,7 @@ use crate::header::Header;
 use crate::io::Driver;
 use crate::status::{
     BAD_BITPIX, BAD_DATATYPE, BAD_ELEM_NUM, BAD_PIX_NUM, HEADER_NOT_EMPTY, NEG_BYTES, NOT_IMAGE,
-    NUM_OVERFLOW, READONLY_FILE,
+    NUM_OVERFLOW,
 };
 use crate::types::{HduType, ImageType, RECORD_LEN};
 
@@ -314,14 +314,6 @@ impl FitsFile {
             npix as i64,
             ty.bytes_per_pixel(),
         ))
-    }
-
-    fn require_write(&self) -> Result<()> {
-        if self.inner()?.writable {
-            Ok(())
-        } else {
-            Err(FitsError::new(READONLY_FILE))
-        }
     }
 }
 

@@ -192,6 +192,23 @@ impl FitsFile {
         Ok(&inner.hdus[inner.current].header)
     }
 
+    /// Mutable header; marks the HDU dirty so the next flush rewrites it.
+    pub fn header_mut(&mut self) -> Result<&mut Header> {
+        self.require_write()?;
+        let inner = self.inner_mut()?;
+        inner.dirty = true;
+        let idx = inner.current;
+        Ok(&mut inner.hdus[idx].header)
+    }
+
+    pub(crate) fn require_write(&self) -> Result<()> {
+        if self.inner()?.writable {
+            Ok(())
+        } else {
+            Err(FitsError::new(READONLY_FILE))
+        }
+    }
+
     /// Copy on-disk / in-memory bytes after flushing.
     pub fn to_bytes(&mut self) -> Result<Vec<u8>> {
         self.flush_inner()?;
@@ -223,10 +240,7 @@ impl FitsFile {
             };
         }
         if inner.dirty {
-            let idx = inner.current;
-            let bytes = inner.hdus[idx].header.to_record_bytes();
-            let start = inner.hdus[idx].header_start;
-            inner.io.write_at(start, &bytes)?;
+            flush_header_and_maybe_shift(inner)?;
             inner.dirty = false;
         }
         inner.io.flush()?;
@@ -239,6 +253,34 @@ impl Drop for FitsFile {
         let _ = self.flush_inner();
         self.inner.take();
     }
+}
+
+fn flush_header_and_maybe_shift(inner: &mut Inner) -> Result<()> {
+    let idx = inner.current;
+    let header_start = inner.hdus[idx].header_start;
+    let old_data_start = inner.hdus[idx].data_start;
+    let mut hb = inner.hdus[idx].header.to_record_bytes();
+    let data_bytes = inner.hdus[idx].data_bytes().unwrap_or(0);
+    let old_data_len = inner.io.len()?.saturating_sub(old_data_start);
+    if data_bytes > 0 && hb.len() < (old_data_start - header_start) as usize {
+        hb.resize((old_data_start - header_start) as usize, b' ');
+    }
+    let new_data_start = header_start + hb.len() as u64;
+    if new_data_start != old_data_start && old_data_len > 0 && data_bytes > 0 {
+        let mut buf = vec![0u8; old_data_len as usize];
+        let n = inner.io.read_at(old_data_start, &mut buf)?;
+        buf.truncate(n);
+        inner.io.write_at(new_data_start, &buf)?;
+    }
+    inner.io.write_at(header_start, &hb)?;
+    let tail = if data_bytes > 0 {
+        crate::convert::pad_data_len(data_bytes)
+    } else {
+        0
+    };
+    inner.io.truncate(new_data_start + tail)?;
+    inner.hdus[idx].data_start = new_data_start;
+    Ok(())
 }
 
 fn parse_hdus(bytes: &[u8]) -> Result<Vec<Hdu>> {

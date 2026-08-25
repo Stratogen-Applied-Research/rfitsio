@@ -9,12 +9,14 @@
 
 pub mod card;
 pub mod convert;
+pub mod datetime;
 pub mod error;
 pub mod file;
 pub mod hdu;
 pub mod header;
 pub mod image;
 pub mod io;
+pub mod keys;
 pub mod status;
 pub mod types;
 
@@ -26,8 +28,9 @@ pub use error::{FitsError, Result};
 pub use file::{
     AccessMode, FitsFile, fits_close_file, fits_create_file, fits_create_memfile, fits_open_file,
 };
-pub use header::Header;
+pub use header::{Header, PrimaryInfo};
 pub use image::{Pixel, fits_create_img, fits_read_img, fits_write_img};
+pub use keys::{fits_read_key_str, fits_write_date, fits_write_key_str};
 pub use status::{fits_get_errstatus, status_text};
 pub use types::{
     CARD_LEN, CFITSIO_MAJOR, CFITSIO_MICRO, CFITSIO_MINOR, HduType, ImageType, KeyClass,

@@ -253,7 +253,70 @@ pub fn format_string_value(s: &str) -> String {
 /// CFITSIO `ffd2f`: fixed-point double (`%.{decim}f`).
 #[must_use]
 pub fn format_fixed_double(value: f64, decim: usize) -> String {
-    format!("{value:.decim$}")
+    format!("{value:.decim$}").replace(',', ".")
+}
+
+/// CFITSIO `ffd2e`: exponential double (`%.*E`), two-digit signed exponent.
+#[must_use]
+pub fn format_exp_double(value: f64, decim: usize) -> String {
+    let s = format!("{value:.decim$E}").replace(',', ".");
+    normalize_c_exp(&s)
+}
+
+fn normalize_c_exp(s: &str) -> String {
+    let Some(idx) = s.find('E').or_else(|| s.find('e')) else {
+        return s.to_string();
+    };
+    let (mant, exp) = s.split_at(idx);
+    let exp = &exp[1..];
+    let exp_i: i32 = exp.parse().unwrap_or(0);
+    format!("{mant}E{exp_i:+03}")
+}
+
+/// Unquote a FITS string value (`ffc2s`): strip quotes, undouble `''`,
+/// trim trailing spaces.
+#[must_use]
+pub fn unquote_fits_string(val: &str) -> String {
+    let s = val.trim();
+    if !s.starts_with('\'') {
+        return s.trim_end().to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut i = 1usize;
+    let mut out = String::new();
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                out.push('\'');
+                i += 2;
+                continue;
+            }
+            break;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out.trim_end().to_string()
+}
+
+/// Complex value `(real, imag)` using exponential format (`ffpkyc` / `ffpkym`).
+#[must_use]
+pub fn format_complex_exp(real: f64, imag: f64, decim: usize) -> String {
+    format!(
+        "({}, {})",
+        format_exp_double(real, decim),
+        format_exp_double(imag, decim)
+    )
+}
+
+/// Complex value using fixed format (`ffpkfc` / `ffpkfm`).
+#[must_use]
+pub fn format_complex_fixed(real: f64, imag: f64, decim: usize) -> String {
+    format!(
+        "({}, {})",
+        format_fixed_double(real, decim),
+        format_fixed_double(imag, decim)
+    )
 }
 
 /// `fits_test_keyword` / `fftkey`.

@@ -71,6 +71,82 @@ unsafe extern "C" {
         array: *mut c_void,
         status: *mut c_int,
     ) -> c_int;
+    fn ffd2e(dval: f64, decim: c_int, cval: *mut c_char, status: *mut c_int) -> c_int;
+    fn ffd2f(dval: f64, decim: c_int, cval: *mut c_char, status: *mut c_int) -> c_int;
+    fn ffpkys(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: *const c_char,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpkyj(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: c_longlong,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpkyl(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: c_int,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpkye(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: f32,
+        decim: c_int,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpkyd(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: f64,
+        decim: c_int,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpkyg(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: f64,
+        decim: c_int,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpkyu(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpcom(fptr: *mut c_void, comm: *const c_char, status: *mut c_int) -> c_int;
+    fn ffphis(fptr: *mut c_void, history: *const c_char, status: *mut c_int) -> c_int;
+    fn ffukys(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: *const c_char,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffmkys(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        value: *const c_char,
+        comm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffdkey(fptr: *mut c_void, keyname: *const c_char, status: *mut c_int) -> c_int;
+    fn ffpunt(
+        fptr: *mut c_void,
+        keyname: *const c_char,
+        unit: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
     fn ffgpv(
         fptr: *mut c_void,
         datatype: c_int,
@@ -346,4 +422,271 @@ pub fn read_primary_image<T>(path: &str, datatype: i32, out: &mut [T]) -> Result
         }
     }
     Ok(anynul as i32)
+}
+
+/// Open a new empty-primary FITS file via CFITSIO.
+pub struct CFile {
+    fptr: *mut c_void,
+}
+
+impl CFile {
+    /// `ffinit` + `ffphps`(BITPIX=8, NAXIS=0).
+    pub fn create_empty(path: &str) -> Result<Self, i32> {
+        let _g = lock();
+        let cpath = CString::new(path).map_err(|_| 105)?;
+        let mut fptr: *mut c_void = std::ptr::null_mut();
+        let mut status: c_int = 0;
+        unsafe {
+            ffinit(&raw mut fptr, cpath.as_ptr(), &raw mut status);
+            if status != 0 {
+                return Err(status as i32);
+            }
+            ffphps(fptr, 8, 0, std::ptr::null_mut(), &raw mut status);
+            if status != 0 {
+                let mut cs = status;
+                ffclos(fptr, &raw mut cs);
+                return Err(status as i32);
+            }
+        }
+        Ok(Self { fptr })
+    }
+
+    fn cstr(s: &str) -> CString {
+        CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
+    }
+
+    fn comm_ptr(comm: Option<&str>) -> (*const c_char, Option<CString>) {
+        match comm {
+            Some(c) => {
+                let cs = Self::cstr(c);
+                (cs.as_ptr(), Some(cs))
+            }
+            None => (std::ptr::null(), None),
+        }
+    }
+
+    /// `ffpkys`.
+    pub fn write_str(&mut self, name: &str, value: &str, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let v = Self::cstr(value);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe { ffpkys(self.fptr, n.as_ptr(), v.as_ptr(), cp, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffpkyj`.
+    pub fn write_lng(&mut self, name: &str, value: i64, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe {
+            ffpkyj(
+                self.fptr,
+                n.as_ptr(),
+                value as c_longlong,
+                cp,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffpkyl`.
+    pub fn write_log(&mut self, name: &str, value: bool, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe {
+            ffpkyl(
+                self.fptr,
+                n.as_ptr(),
+                i32::from(value) as c_int,
+                cp,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffpkyd`.
+    pub fn write_dbl(&mut self, name: &str, value: f64, decim: i32, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe {
+            ffpkyd(
+                self.fptr,
+                n.as_ptr(),
+                value,
+                decim as c_int,
+                cp,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffpkyg`.
+    pub fn write_fixdbl(&mut self, name: &str, value: f64, decim: i32, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe {
+            ffpkyg(
+                self.fptr,
+                n.as_ptr(),
+                value,
+                decim as c_int,
+                cp,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffpkye`.
+    pub fn write_flt(&mut self, name: &str, value: f32, decim: i32, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe {
+            ffpkye(
+                self.fptr,
+                n.as_ptr(),
+                value,
+                decim as c_int,
+                cp,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffpkyu`.
+    pub fn write_null(&mut self, name: &str, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe { ffpkyu(self.fptr, n.as_ptr(), cp, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffpcom`.
+    pub fn write_comment(&mut self, comm: &str) -> i32 {
+        let _g = lock();
+        let c = Self::cstr(comm);
+        let mut status: c_int = 0;
+        unsafe { ffpcom(self.fptr, c.as_ptr(), &raw mut status) };
+        status as i32
+    }
+
+    /// `ffphis`.
+    pub fn write_history(&mut self, hist: &str) -> i32 {
+        let _g = lock();
+        let c = Self::cstr(hist);
+        let mut status: c_int = 0;
+        unsafe { ffphis(self.fptr, c.as_ptr(), &raw mut status) };
+        status as i32
+    }
+
+    /// `ffpunt`.
+    pub fn write_unit(&mut self, name: &str, unit: &str) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let u = Self::cstr(unit);
+        let mut status: c_int = 0;
+        unsafe { ffpunt(self.fptr, n.as_ptr(), u.as_ptr(), &raw mut status) };
+        status as i32
+    }
+
+    /// `ffukys`.
+    pub fn update_str(&mut self, name: &str, value: &str, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let v = Self::cstr(value);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe { ffukys(self.fptr, n.as_ptr(), v.as_ptr(), cp, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffmkys`.
+    pub fn modify_str(&mut self, name: &str, value: &str, comm: Option<&str>) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let v = Self::cstr(value);
+        let (cp, _hold) = Self::comm_ptr(comm);
+        let mut status: c_int = 0;
+        unsafe { ffmkys(self.fptr, n.as_ptr(), v.as_ptr(), cp, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffdkey`.
+    pub fn delete_key(&mut self, name: &str) -> i32 {
+        let _g = lock();
+        let n = Self::cstr(name);
+        let mut status: c_int = 0;
+        unsafe { ffdkey(self.fptr, n.as_ptr(), &raw mut status) };
+        status as i32
+    }
+
+    /// `ffclos`.
+    pub fn close(mut self) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffclos(self.fptr, &raw mut status) };
+        self.fptr = std::ptr::null_mut();
+        status as i32
+    }
+}
+
+impl Drop for CFile {
+    fn drop(&mut self) {
+        if !self.fptr.is_null() {
+            let _g = lock();
+            let mut status: c_int = 0;
+            unsafe { ffclos(self.fptr, &raw mut status) };
+            self.fptr = std::ptr::null_mut();
+        }
+    }
+}
+
+/// `ffd2e` text.
+pub fn ffd2e_str(value: f64, decim: i32) -> (String, i32) {
+    let _g = lock();
+    let mut buf = [0u8; FLEN_VALUE];
+    let mut status: c_int = 0;
+    unsafe {
+        ffd2e(
+            value,
+            decim as c_int,
+            buf.as_mut_ptr().cast::<c_char>(),
+            &raw mut status,
+        );
+    }
+    (cstr_to_string(&buf), status as i32)
+}
+
+/// `ffd2f` text.
+pub fn ffd2f_str(value: f64, decim: i32) -> (String, i32) {
+    let _g = lock();
+    let mut buf = [0u8; FLEN_VALUE];
+    let mut status: c_int = 0;
+    unsafe {
+        ffd2f(
+            value,
+            decim as c_int,
+            buf.as_mut_ptr().cast::<c_char>(),
+            &raw mut status,
+        );
+    }
+    (cstr_to_string(&buf), status as i32)
 }
