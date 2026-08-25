@@ -11,6 +11,7 @@ pub mod bintable;
 pub mod card;
 pub mod convert;
 pub mod datetime;
+pub mod edithdu;
 pub mod error;
 pub mod file;
 pub mod hdu;
@@ -26,6 +27,10 @@ pub mod types;
 pub use card::{
     Card, fits_get_keyclass, fits_get_keyname, fits_make_key, fits_parse_value, fits_test_keyword,
     make_card_string,
+};
+pub use edithdu::{
+    fits_copy_data, fits_copy_file, fits_copy_hdu, fits_copy_header, fits_create_hdu,
+    fits_delete_hdu, fits_insert_atbl, fits_insert_btbl, fits_insert_img,
 };
 pub use error::{FitsError, Result};
 pub use file::{

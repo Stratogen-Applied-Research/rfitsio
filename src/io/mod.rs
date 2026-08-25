@@ -94,3 +94,45 @@ pub(crate) fn write_fill(io: &mut dyn Driver, pos: u64, len: u64, byte: u8) -> R
     }
     Ok(())
 }
+
+/// Insert `n` filled bytes at `at`, shifting the existing tail to the right.
+pub(crate) fn insert_bytes(io: &mut dyn Driver, at: u64, n: u64, fill: u8) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let len = io.len()?;
+    if at < len {
+        let tail_len = (len - at) as usize;
+        let mut tail = vec![0u8; tail_len];
+        let got = io.read_at(at, &mut tail)?;
+        tail.truncate(got);
+        if !tail.is_empty() {
+            io.write_at(at + n, &tail)?;
+        }
+    }
+    write_fill(io, at, n, fill)?;
+    io.truncate(len.max(at) + n)?;
+    Ok(())
+}
+
+/// Delete `n` bytes starting at `at`, shifting the tail left and truncating.
+pub(crate) fn delete_bytes(io: &mut dyn Driver, at: u64, n: u64) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let len = io.len()?;
+    if at >= len {
+        return Ok(());
+    }
+    let end = at.saturating_add(n).min(len);
+    let removed = end - at;
+    if end < len {
+        let tail_len = (len - end) as usize;
+        let mut tail = vec![0u8; tail_len];
+        let got = io.read_at(end, &mut tail)?;
+        tail.truncate(got);
+        io.write_at(at, &tail)?;
+    }
+    io.truncate(len - removed)?;
+    Ok(())
+}

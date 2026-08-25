@@ -76,6 +76,29 @@ pub(crate) struct Inner {
     pub(crate) dirty: bool,
 }
 
+impl Inner {
+    pub(crate) fn last_end(&self) -> Result<u64> {
+        let last = self
+            .hdus
+            .last()
+            .ok_or_else(|| FitsError::new(BAD_HDU_NUM))?;
+        last.end()
+    }
+
+    pub(crate) fn bump_offsets_from(&mut self, from_idx: usize, delta: i64) {
+        for hdu in self.hdus.iter_mut().skip(from_idx) {
+            if delta >= 0 {
+                hdu.header_start = hdu.header_start.saturating_add(delta as u64);
+                hdu.data_start = hdu.data_start.saturating_add(delta as u64);
+            } else {
+                let d = (-delta) as u64;
+                hdu.header_start = hdu.header_start.saturating_sub(d);
+                hdu.data_start = hdu.data_start.saturating_sub(d);
+            }
+        }
+    }
+}
+
 /// An open FITS file.
 pub struct FitsFile {
     inner: Option<Inner>,
@@ -280,24 +303,26 @@ fn flush_header_and_maybe_shift(inner: &mut Inner) -> Result<()> {
     let old_data_start = inner.hdus[idx].data_start;
     let mut hb = inner.hdus[idx].header.to_record_bytes();
     let data_bytes = inner.hdus[idx].data_bytes().unwrap_or(0);
-    let old_data_len = inner.io.len()?.saturating_sub(old_data_start);
-    if data_bytes > 0 && hb.len() < (old_data_start - header_start) as usize {
-        hb.resize((old_data_start - header_start) as usize, b' ');
+    let old_header_len = old_data_start.saturating_sub(header_start);
+    if data_bytes > 0 && (hb.len() as u64) < old_header_len {
+        hb.resize(old_header_len as usize, b' ');
     }
     let new_data_start = header_start + hb.len() as u64;
-    if new_data_start != old_data_start && old_data_len > 0 && data_bytes > 0 {
-        let mut buf = vec![0u8; old_data_len as usize];
-        let n = inner.io.read_at(old_data_start, &mut buf)?;
-        buf.truncate(n);
-        inner.io.write_at(new_data_start, &buf)?;
+    let delta = new_data_start as i64 - old_data_start as i64;
+    if delta > 0 {
+        io::insert_bytes(&mut inner.io, old_data_start, delta as u64, b' ')?;
+        inner.bump_offsets_from(idx + 1, delta);
+    } else if delta < 0 {
+        io::delete_bytes(&mut inner.io, new_data_start, (-delta) as u64)?;
+        inner.bump_offsets_from(idx + 1, delta);
     }
     inner.io.write_at(header_start, &hb)?;
+    inner.hdus[idx].data_start = new_data_start;
     let tail = if data_bytes > 0 {
         crate::convert::pad_data_len(data_bytes)
     } else {
         0
     };
-    inner.io.truncate(new_data_start + tail)?;
     if inner.hdus[idx].hdu_type == HduType::AsciiTable && tail > data_bytes {
         io::write_fill(
             &mut inner.io,
@@ -306,7 +331,10 @@ fn flush_header_and_maybe_shift(inner: &mut Inner) -> Result<()> {
             b' ',
         )?;
     }
-    inner.hdus[idx].data_start = new_data_start;
+    let file_end = inner.last_end()?;
+    if inner.io.len()? > file_end {
+        inner.io.truncate(file_end)?;
+    }
     Ok(())
 }
 

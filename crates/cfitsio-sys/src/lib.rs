@@ -306,6 +306,54 @@ unsafe extern "C" {
         larray: *mut c_char,
         status: *mut c_int,
     ) -> c_int;
+    fn ffcopy(
+        infptr: *mut c_void,
+        outfptr: *mut c_void,
+        morekeys: c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffcpfl(
+        infptr: *mut c_void,
+        outfptr: *mut c_void,
+        previous: c_int,
+        current: c_int,
+        following: c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffcphd(infptr: *mut c_void, outfptr: *mut c_void, status: *mut c_int) -> c_int;
+    fn ffcpdt(infptr: *mut c_void, outfptr: *mut c_void, status: *mut c_int) -> c_int;
+    fn ffdhdu(fptr: *mut c_void, hdutype: *mut c_int, status: *mut c_int) -> c_int;
+    fn ffiimg(
+        fptr: *mut c_void,
+        bitpix: c_int,
+        naxis: c_int,
+        naxes: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffitab(
+        fptr: *mut c_void,
+        naxis1: c_longlong,
+        naxis2: c_longlong,
+        tfields: c_int,
+        ttype: *mut *mut c_char,
+        tbcol: *mut c_long,
+        tform: *mut *mut c_char,
+        tunit: *mut *mut c_char,
+        extnmx: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffibin(
+        fptr: *mut c_void,
+        naxis2: c_longlong,
+        tfields: c_int,
+        ttype: *mut *mut c_char,
+        tform: *mut *mut c_char,
+        tunit: *mut *mut c_char,
+        extnmx: *const c_char,
+        pcount: c_longlong,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffthdu(fptr: *mut c_void, nhdu: *mut c_int, status: *mut c_int) -> c_int;
 }
 
 pub const ASCII_TBL: c_int = 1;
@@ -1152,6 +1200,178 @@ impl CFile {
                 &raw mut status,
             )
         };
+        status as i32
+    }
+
+    /// `ffthdu`.
+    pub fn num_hdus(&mut self) -> Result<i32, i32> {
+        let _g = lock();
+        let mut nhdu: c_int = 0;
+        let mut status: c_int = 0;
+        unsafe { ffthdu(self.fptr, &raw mut nhdu, &raw mut status) };
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok(nhdu as i32)
+        }
+    }
+
+    /// `ffcopy`.
+    pub fn copy_hdu(&mut self, dest: &mut CFile, morekeys: i32) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffcopy(self.fptr, dest.fptr, morekeys as c_int, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffcpfl`.
+    pub fn copy_file(
+        &mut self,
+        dest: &mut CFile,
+        previous: bool,
+        current: bool,
+        following: bool,
+    ) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe {
+            ffcpfl(
+                self.fptr,
+                dest.fptr,
+                i32::from(previous) as c_int,
+                i32::from(current) as c_int,
+                i32::from(following) as c_int,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffcphd`.
+    pub fn copy_header(&mut self, dest: &mut CFile) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffcphd(self.fptr, dest.fptr, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffcpdt`.
+    pub fn copy_data(&mut self, dest: &mut CFile) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffcpdt(self.fptr, dest.fptr, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffdhdu`. Returns the type of the new current HDU.
+    pub fn delete_hdu(&mut self) -> Result<i32, i32> {
+        let _g = lock();
+        let mut hdutype: c_int = 0;
+        let mut status: c_int = 0;
+        unsafe { ffdhdu(self.fptr, &raw mut hdutype, &raw mut status) };
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok(hdutype as i32)
+        }
+    }
+
+    /// `ffiimg`.
+    pub fn insert_img(&mut self, bitpix: i32, naxes: &[i64]) -> i32 {
+        let _g = lock();
+        let mut axes: Vec<c_long> = naxes.iter().map(|&n| n as c_long).collect();
+        let mut status: c_int = 0;
+        let naxis = naxes.len() as c_int;
+        let ptr = if axes.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            axes.as_mut_ptr()
+        };
+        unsafe { ffiimg(self.fptr, bitpix as c_int, naxis, ptr, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffibin`.
+    pub fn insert_btbl(
+        &mut self,
+        nrows: i64,
+        ttype: &[&str],
+        tform: &[&str],
+        tunit: &[Option<&str>],
+        extname: Option<&str>,
+    ) -> i32 {
+        let _g = lock();
+        let tfields = tform.len() as c_int;
+        let mut ttype_c: Vec<CString> = ttype.iter().map(|s| Self::cstr(s)).collect();
+        while ttype_c.len() < tform.len() {
+            ttype_c.push(Self::cstr(""));
+        }
+        let tform_c: Vec<CString> = tform.iter().map(|s| Self::cstr(s)).collect();
+        let tunit_c: Vec<CString> = (0..tform.len())
+            .map(|i| Self::cstr(tunit.get(i).copied().flatten().unwrap_or("")))
+            .collect();
+        let mut ttype_p: Vec<*mut c_char> = ttype_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut tform_p: Vec<*mut c_char> = tform_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut tunit_p: Vec<*mut c_char> = tunit_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let ext = extname.map(Self::cstr);
+        let ext_ptr = ext.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let mut status: c_int = 0;
+        unsafe {
+            ffibin(
+                self.fptr,
+                nrows as c_longlong,
+                tfields,
+                ttype_p.as_mut_ptr(),
+                tform_p.as_mut_ptr(),
+                tunit_p.as_mut_ptr(),
+                ext_ptr,
+                0,
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffitab`. `naxis1 = 0` lets CFITSIO compute the row width.
+    pub fn insert_atbl(
+        &mut self,
+        naxis1: i64,
+        nrows: i64,
+        ttype: &[&str],
+        tform: &[&str],
+        tunit: &[Option<&str>],
+        extname: Option<&str>,
+    ) -> i32 {
+        let _g = lock();
+        let tfields = tform.len() as c_int;
+        let mut ttype_c: Vec<CString> = ttype.iter().map(|s| Self::cstr(s)).collect();
+        while ttype_c.len() < tform.len() {
+            ttype_c.push(Self::cstr(""));
+        }
+        let tform_c: Vec<CString> = tform.iter().map(|s| Self::cstr(s)).collect();
+        let tunit_c: Vec<CString> = (0..tform.len())
+            .map(|i| Self::cstr(tunit.get(i).copied().flatten().unwrap_or("")))
+            .collect();
+        let mut ttype_p: Vec<*mut c_char> = ttype_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut tform_p: Vec<*mut c_char> = tform_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut tunit_p: Vec<*mut c_char> = tunit_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let ext = extname.map(Self::cstr);
+        let ext_ptr = ext.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let mut status: c_int = 0;
+        unsafe {
+            ffitab(
+                self.fptr,
+                naxis1 as c_longlong,
+                nrows as c_longlong,
+                tfields,
+                ttype_p.as_mut_ptr(),
+                std::ptr::null_mut(),
+                tform_p.as_mut_ptr(),
+                tunit_p.as_mut_ptr(),
+                ext_ptr,
+                &raw mut status,
+            );
+        }
         status as i32
     }
 

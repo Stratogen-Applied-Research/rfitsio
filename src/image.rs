@@ -171,13 +171,6 @@ impl FitsFile {
         Ok(())
     }
 
-    /// `fits_insert_img` / `ffiimg` analogue: always a new IMAGE HDU.
-    ///
-    /// If the current HDU is still a null primary, this matches `create_image`.
-    pub fn insert_image(&mut self, ty: ImageType, naxes: &[i64]) -> Result<()> {
-        self.create_image(ty, naxes)
-    }
-
     /// Write `data` starting at 1-based `firstelem` (`fits_write_img` / `ffppr`).
     pub fn write_image<T: Pixel>(&mut self, firstelem: i64, data: &[T]) -> Result<()> {
         self.require_write()?;

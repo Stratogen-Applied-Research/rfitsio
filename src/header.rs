@@ -6,7 +6,7 @@ use crate::card::{
 };
 use crate::error::{FitsError, Result};
 use crate::status::{
-    BAD_BITPIX, BAD_KEYCHAR, BAD_NAXIS, BAD_TBCOL, BAD_TFIELDS, BAD_TFORM, KEY_NO_EXIST,
+    BAD_BITPIX, BAD_KEYCHAR, BAD_NAXES, BAD_NAXIS, BAD_TBCOL, BAD_TFIELDS, BAD_TFORM, KEY_NO_EXIST,
     KEY_OUT_BOUNDS, NEG_AXIS, NEG_ROWS, NEG_WIDTH, NO_END, NO_TBCOL, NO_TFORM, NO_XTENSION,
     NOT_ATABLE, NOT_BTABLE,
 };
@@ -27,6 +27,8 @@ pub const COMM_NAXIS_N: &str = "length of data axis ";
 pub const COMM_XTENSION_IMAGE: &str = "IMAGE extension";
 pub const COMM_PCOUNT: &str = "required keyword; must = 0";
 pub const COMM_GCOUNT: &str = "required keyword; must = 1";
+pub const COMM_PCOUNT_GROUP: &str = "number of random group parameters";
+pub const COMM_GCOUNT_GROUP: &str = "number of random groups";
 pub const COMM_BSCALE: &str = "default scaling factor";
 pub const COMM_BZERO_USHORT: &str = "offset data range to that of unsigned short";
 pub const COMM_BZERO_ULONG: &str = "offset data range to that of unsigned long";
@@ -136,6 +138,18 @@ impl Header {
         Self { cards: Vec::new() }
     }
 
+    /// Header from an ordered list of cards (no END).
+    #[must_use]
+    pub fn from_cards(cards: Vec<Card>) -> Self {
+        Self { cards }
+    }
+
+    /// True if this header is a primary array (`SIMPLE` present).
+    #[must_use]
+    pub fn is_primary(&self) -> bool {
+        self.card_by_name("SIMPLE").is_some()
+    }
+
     /// CFITSIO empty primary: SIMPLE/BITPIX=8/NAXIS=0/EXTEND plus COMMENTs.
     pub fn empty_primary() -> Result<Self> {
         let mut h = Self::new();
@@ -243,8 +257,8 @@ impl Header {
         h.write_long("BITPIX", i64::from(ty.bitpix()), Some(COMM_BITPIX))?;
         h.write_long("NAXIS", naxes.len() as i64, Some(COMM_NAXIS))?;
         for (i, &len) in naxes.iter().enumerate() {
-            if len < 1 {
-                return Err(FitsError::new(NEG_AXIS));
+            if len < 0 {
+                return Err(FitsError::new(BAD_NAXES));
             }
             let name = format!("NAXIS{}", i + 1);
             let comm = format!("{COMM_NAXIS_N}{}", i + 1);
@@ -960,21 +974,76 @@ impl Header {
     /// Serialize cards + END + space fill to a multiple of 2880 bytes.
     #[must_use]
     pub fn to_record_bytes(&self) -> Vec<u8> {
+        self.to_record_bytes_with_morekeys(0)
+    }
+
+    /// Like [`Self::to_record_bytes`], reserving `morekeys` extra 80-byte slots
+    /// after `END` (`fits_write_hdu_space` / `ffhdef`).
+    #[must_use]
+    pub fn to_record_bytes_with_morekeys(&self, morekeys: i32) -> Vec<u8> {
         let mut out = Vec::with_capacity(RECORD_LEN);
         for card in &self.cards {
             out.extend_from_slice(card.as_bytes());
         }
         out.extend_from_slice(end_card().as_bytes());
-        let rem = out.len() % RECORD_LEN;
-        if rem != 0 {
-            out.resize(out.len() + (RECORD_LEN - rem), b' ');
-        }
-        if out.is_empty() {
-            // END alone still occupies one record.
-            out.resize(RECORD_LEN, b' ');
-            out[..CARD_LEN].copy_from_slice(end_card().as_bytes());
-        }
+        let extra = morekeys.max(0) as usize * CARD_LEN;
+        let min_len = out.len() + extra;
+        let padded = min_len.div_ceil(RECORD_LEN).max(1) * RECORD_LEN;
+        out.resize(padded, b' ');
         out
+    }
+
+    /// Remaining keyword slots in an on-disk header of `header_len` bytes
+    /// (`ffghsp` `nmore`, not counting `END`).
+    #[must_use]
+    pub fn nmore_in(&self, header_len: u64) -> i32 {
+        let nmore = (header_len / CARD_LEN as u64) as i32 - self.cards.len() as i32 - 1;
+        nmore.max(0)
+    }
+
+    /// Convert a primary-array header into an IMAGE extension (`ffcphd`).
+    pub fn primary_as_image_extension(&self) -> Result<Self> {
+        let naxis = self.get_i64("NAXIS").unwrap_or(0).max(0) as usize;
+        let mut out = Self::new();
+        out.write_string("XTENSION", "IMAGE", Some(COMM_XTENSION_IMAGE))?;
+        let start = 1.min(self.cards.len());
+        let struct_end = (3 + naxis).min(self.cards.len());
+        if start < struct_end {
+            for card in &self.cards[start..struct_end] {
+                out.cards.push(*card);
+            }
+        }
+        out.write_long("PCOUNT", 0, Some(COMM_PCOUNT_GROUP))?;
+        out.write_long("GCOUNT", 1, Some(COMM_GCOUNT_GROUP))?;
+        for card in &self.cards[struct_end..] {
+            if card_name_is(card, "EXTEND") || is_std_fits_comment(card) {
+                continue;
+            }
+            out.cards.push(*card);
+        }
+        Ok(out)
+    }
+
+    /// Convert an IMAGE extension header into a primary array (`ffcphd`).
+    pub fn image_extension_as_primary(&self) -> Result<Self> {
+        let naxis = self.get_i64("NAXIS").unwrap_or(0).max(0) as usize;
+        let mut out = Self::new();
+        out.write_logical("SIMPLE", true, Some(COMM_SIMPLE))?;
+        let struct_end = (3 + naxis).min(self.cards.len());
+        let start = 1.min(self.cards.len());
+        for card in &self.cards[start..struct_end] {
+            out.cards.push(*card);
+        }
+        out.write_logical("EXTEND", true, Some(COMM_EXTEND))?;
+        out.push(Card::from_text(COMMENT_FITS_1));
+        out.push(Card::from_text(COMMENT_FITS_2));
+        for card in &self.cards[struct_end..] {
+            if card_name_is(card, "PCOUNT") || card_name_is(card, "GCOUNT") {
+                continue;
+            }
+            out.cards.push(*card);
+        }
+        Ok(out)
     }
 
     /// Parse a header from the start of a FITS file image.
@@ -1010,6 +1079,16 @@ impl Header {
 
 fn end_card() -> Card {
     Card::from_text("END")
+}
+
+fn card_name_is(card: &Card, name: &str) -> bool {
+    name8_bytes(&card.as_bytes()[..8]) == name8(name)
+}
+
+fn is_std_fits_comment(card: &Card) -> bool {
+    let s = card.as_str().unwrap_or("");
+    s.starts_with("COMMENT   FITS (Flexible Image Transport System) format is")
+        || s.starts_with("COMMENT   and Astrophysics', volume 376, page 3")
 }
 
 fn is_end_card(bytes: &[u8]) -> bool {

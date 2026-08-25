@@ -30,8 +30,16 @@ impl Hdu {
         })
     }
 
+    /// Byte offset of the first byte after this HDU (header + padded data).
+    pub fn end(&self) -> crate::error::Result<u64> {
+        Ok(self.data_start + self.data_unit_len()?)
+    }
+
     /// Unpadded data-unit size in bytes.
     pub fn data_bytes(&self) -> crate::error::Result<u64> {
+        if self.header.is_empty() {
+            return Ok(0);
+        }
         match self.hdu_type {
             HduType::AsciiTable | HduType::BinaryTable => {
                 let naxis1 = self.header.get_i64("NAXIS1").unwrap_or(0).max(0) as u64;
