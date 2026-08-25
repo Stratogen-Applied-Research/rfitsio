@@ -41,7 +41,8 @@ impl FitsFile {
     ) -> Result<()> {
         match kind {
             HduType::AsciiTable => self.create_ascii_table(nrows, ttype, tform, tunit, extname),
-            HduType::BinaryTable | HduType::Image => Err(FitsError::new(NOT_TABLE)),
+            HduType::BinaryTable => self.create_binary_table(nrows, ttype, tform, tunit, extname),
+            HduType::Image => Err(FitsError::new(NOT_TABLE)),
         }
     }
 
@@ -114,6 +115,9 @@ impl FitsFile {
 
     /// Write string values to column `colnum` starting at 1-based `firstrow`.
     pub fn write_col_str(&mut self, colnum: i32, firstrow: i64, values: &[&str]) -> Result<()> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.write_bin_col_str(colnum, firstrow, values);
+        }
         self.require_write()?;
         if values.is_empty() {
             return Ok(());
@@ -136,16 +140,37 @@ impl FitsFile {
 
     /// Write integer values; formatted with the column TFORM (`I`/`F`/`E`/`D`).
     pub fn write_col_i64(&mut self, colnum: i32, firstrow: i64, values: &[i64]) -> Result<()> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.write_bin_col_i64(colnum, firstrow, values);
+        }
         self.write_col_numbers(colnum, firstrow, values.iter().map(|&v| v as f64))
+    }
+
+    /// Write unsigned 64-bit values (binary `K`/`W` columns).
+    pub fn write_col_u64(&mut self, colnum: i32, firstrow: i64, values: &[u64]) -> Result<()> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.write_bin_col_u64(colnum, firstrow, values);
+        }
+        self.write_col_i64(
+            colnum,
+            firstrow,
+            &values.iter().map(|&v| v as i64).collect::<Vec<_>>(),
+        )
     }
 
     /// Write `f32` values.
     pub fn write_col_f32(&mut self, colnum: i32, firstrow: i64, values: &[f32]) -> Result<()> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.write_bin_col_f32(colnum, firstrow, values);
+        }
         self.write_col_numbers(colnum, firstrow, values.iter().map(|&v| f64::from(v)))
     }
 
     /// Write `f64` values.
     pub fn write_col_f64(&mut self, colnum: i32, firstrow: i64, values: &[f64]) -> Result<()> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.write_bin_col_f64(colnum, firstrow, values);
+        }
         self.write_col_numbers(colnum, firstrow, values.iter().copied())
     }
 
@@ -157,6 +182,9 @@ impl FitsFile {
         nelem: usize,
         nulval: Option<&str>,
     ) -> Result<(Vec<String>, bool)> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.read_bin_col_str(colnum, firstrow, nelem, nulval);
+        }
         if nelem == 0 {
             return Ok((Vec::new(), false));
         }
@@ -196,6 +224,9 @@ impl FitsFile {
         nelem: usize,
         nulval: Option<i64>,
     ) -> Result<(Vec<i64>, bool)> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.read_bin_col_i64(colnum, firstrow, nelem, nulval);
+        }
         let (vals, anynul) =
             self.read_col_f64(colnum, firstrow, nelem, nulval.map(|v| v as f64))?;
         let mut out = Vec::with_capacity(vals.len());
@@ -229,6 +260,9 @@ impl FitsFile {
         nelem: usize,
         nulval: Option<f64>,
     ) -> Result<(Vec<f64>, bool)> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.read_bin_col_f64(colnum, firstrow, nelem, nulval);
+        }
         if nelem == 0 {
             return Ok((Vec::new(), false));
         }
@@ -267,6 +301,9 @@ impl FitsFile {
 
     /// Write the column's null string into `nelem` rows (`fits_write_col_null` / `ffpclu`).
     pub fn write_col_null(&mut self, colnum: i32, firstrow: i64, nelem: i64) -> Result<()> {
+        if self.hdu_type()? == HduType::BinaryTable {
+            return self.write_bin_col_null(colnum, firstrow, nelem);
+        }
         self.require_write()?;
         if nelem < 0 {
             return Err(FitsError::new(NEG_BYTES));
@@ -311,7 +348,12 @@ impl FitsFile {
         let (data_start, rowlen) = self.table_geom()?;
         let nshift = rowlen * nrows as u64;
         let from = data_start + firstrow as u64 * rowlen;
-        shift_tail(&mut self.inner_mut()?.io, from, nshift as i64, b' ')?;
+        let fill = if self.hdu_type()? == HduType::AsciiTable {
+            b' '
+        } else {
+            0
+        };
+        shift_tail(&mut self.inner_mut()?.io, from, nshift as i64, fill)?;
         {
             let inner = self.inner_mut()?;
             inner.hdus[inner.current]
@@ -539,14 +581,14 @@ impl FitsFile {
         })
     }
 
-    fn table_geom(&self) -> Result<(u64, u64)> {
+    pub(crate) fn table_geom(&self) -> Result<(u64, u64)> {
         let inner = self.inner()?;
         let hdu = &inner.hdus[inner.current];
         let rowlen = hdu.header.get_i64("NAXIS1")?.max(0) as u64;
         Ok((hdu.data_start, rowlen))
     }
 
-    fn require_table(&self) -> Result<()> {
+    pub(crate) fn require_table(&self) -> Result<()> {
         let inner = self.inner()?;
         match inner.hdus[inner.current].hdu_type {
             HduType::AsciiTable | HduType::BinaryTable => Ok(()),
@@ -554,7 +596,7 @@ impl FitsFile {
         }
     }
 
-    fn require_last_hdu(&self) -> Result<()> {
+    pub(crate) fn require_last_hdu(&self) -> Result<()> {
         let inner = self.inner()?;
         if inner.current + 1 != inner.hdus.len() {
             return Err(FitsError::with_message(
@@ -565,7 +607,7 @@ impl FitsFile {
         Ok(())
     }
 
-    fn check_read_rows(&self, firstrow: i64, nelem: i64) -> Result<()> {
+    pub(crate) fn check_read_rows(&self, firstrow: i64, nelem: i64) -> Result<()> {
         if firstrow < 1 {
             return Err(FitsError::new(BAD_ROW_NUM));
         }
@@ -576,7 +618,7 @@ impl FitsFile {
         Ok(())
     }
 
-    fn ensure_rows(&mut self, firstrow: i64, nelem: i64) -> Result<()> {
+    pub(crate) fn ensure_rows(&mut self, firstrow: i64, nelem: i64) -> Result<()> {
         if firstrow < 1 {
             return Err(FitsError::new(BAD_ROW_NUM));
         }

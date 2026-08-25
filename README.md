@@ -16,6 +16,7 @@ Layer A (core I/O) is under construction. Currently implemented:
 - Image HDUs: all BITPIX (including unsigned-via-BZERO), write/read, implicit conversion, subsets
 - Header keyword CRUD (write/read/update/modify/insert/delete), DATE, units, `ffghpr`
 - ASCII table HDUs: `TFORMn` `Aw`/`Iw`/`Fw.d`/`Ew.d`/`Dw.d`, `TBCOL` spacing, column I/O, `TNULL`, row/column insert-delete
+- Binary table HDUs: `TFORMn` `L/X/B/I/J/K/A/E/D/C/M` plus unsigned `S/U/V/W`, column I/O, `P`/`Q` variable-length arrays and heap/`PCOUNT`
 
 ## Development
 

@@ -8,9 +8,9 @@ use crate::error::{FitsError, Result};
 use crate::status::{
     BAD_BITPIX, BAD_KEYCHAR, BAD_NAXIS, BAD_TBCOL, BAD_TFIELDS, BAD_TFORM, KEY_NO_EXIST,
     KEY_OUT_BOUNDS, NEG_AXIS, NEG_ROWS, NEG_WIDTH, NO_END, NO_TBCOL, NO_TFORM, NO_XTENSION,
-    NOT_ATABLE,
+    NOT_ATABLE, NOT_BTABLE,
 };
-use crate::tform::ascii_column_starts;
+use crate::tform::{BinaryKind, BinaryTform, ascii_column_starts, binary_column_offsets};
 use crate::types::{CARD_LEN, ImageType, RECORD_LEN};
 
 /// CFITSIO `ffphpr` self-documenting COMMENT cards (primary array).
@@ -48,6 +48,19 @@ pub const COMM_EXTNAME_ASCII: &str = "name of this ASCII table extension";
 pub const COMM_TTYPE_INSERTED: &str = "label for field";
 pub const COMM_TFORM_INSERTED: &str = "format of field";
 pub const COMM_TBCOL_INSERTED: &str = "beginning column of field";
+
+pub const COMM_XTENSION_BINTABLE: &str = "binary table extension";
+pub const COMM_BITPIX_BIN: &str = "8-bit bytes";
+pub const COMM_NAXIS_BIN: &str = "2-dimensional binary table";
+pub const COMM_NAXIS1_BIN: &str = "width of table in bytes";
+pub const COMM_NAXIS2_BIN: &str = "number of rows in table";
+pub const COMM_PCOUNT_BIN: &str = "size of special data area";
+pub const COMM_GCOUNT_BIN: &str = "one data group (required keyword)";
+pub const COMM_TFORM_BIN: &str = "data format of field";
+pub const COMM_TZERO_UNSIGNED: &str = "offset for unsigned integers";
+pub const COMM_TZERO_SBYTE: &str = "offset for signed bytes";
+pub const COMM_TSCAL_BIN: &str = "data are not scaled";
+pub const COMM_EXTNAME_BIN: &str = "name of this binary table extension";
 
 /// Result of [`Header::primary_info`] (`ffghpr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +100,27 @@ pub struct AsciiTableInfo {
     pub tunit: Vec<String>,
     /// EXTNAME (empty if absent).
     pub extname: String,
+}
+
+/// Result of [`Header::binary_table_info`] (`ffghbn`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryTableInfo {
+    /// NAXIS2.
+    pub nrows: i64,
+    /// TFIELDS.
+    pub tfields: i32,
+    /// TTYPEn.
+    pub ttype: Vec<String>,
+    /// TFORMn.
+    pub tform: Vec<String>,
+    /// TUNITn.
+    pub tunit: Vec<String>,
+    /// EXTNAME.
+    pub extname: String,
+    /// PCOUNT (heap size).
+    pub pcount: i64,
+    /// NAXIS1 (row width in bytes).
+    pub rowlen: i64,
 }
 
 /// Ordered list of header cards, without the END card or fill.
@@ -349,6 +383,155 @@ impl Header {
             tform,
             tunit,
             extname,
+        })
+    }
+
+    /// Required keywords for a binary table extension (`ffphbn`).
+    pub fn binary_table(
+        nrows: i64,
+        ttype: &[&str],
+        tform: &[&str],
+        tunit: &[Option<&str>],
+        extname: Option<&str>,
+    ) -> Result<Self> {
+        if nrows < 0 {
+            return Err(FitsError::new(NEG_ROWS));
+        }
+        let tfields = tform.len();
+        if tfields > 999 {
+            return Err(FitsError::new(BAD_TFIELDS));
+        }
+        for tf in tform {
+            if tf.len() > 29 {
+                return Err(FitsError::with_message(
+                    BAD_TFORM,
+                    "Error: BIN table TFORM code is too long (ffphbn)",
+                ));
+            }
+        }
+        let (rowlen, _) = binary_column_offsets(tform)?;
+        let mut h = Self::new();
+        h.write_string("XTENSION", "BINTABLE", Some(COMM_XTENSION_BINTABLE))?;
+        h.write_long("BITPIX", 8, Some(COMM_BITPIX_BIN))?;
+        h.write_long("NAXIS", 2, Some(COMM_NAXIS_BIN))?;
+        h.write_long("NAXIS1", rowlen, Some(COMM_NAXIS1_BIN))?;
+        h.write_long("NAXIS2", nrows, Some(COMM_NAXIS2_BIN))?;
+        h.write_long("PCOUNT", 0, Some(COMM_PCOUNT_BIN))?;
+        h.write_long("GCOUNT", 1, Some(COMM_GCOUNT_BIN))?;
+        h.write_long("TFIELDS", tfields as i64, Some(COMM_TFIELDS))?;
+        for (ii, tf) in tform.iter().enumerate() {
+            let n = ii + 1;
+            let ttype_s = ttype.get(ii).copied().unwrap_or("");
+            if !ttype_s.is_empty() {
+                let comm = format!("label for field {n:3}");
+                h.write_string(&format!("TTYPE{n}"), ttype_s, Some(&comm))?;
+            }
+            let parsed = BinaryTform::parse(tf)?;
+            let stored = BinaryTform::stored_code(tf);
+            let comm = format!("{COMM_TFORM_BIN}{}", parsed.tform_comment_suffix());
+            h.write_string(&format!("TFORM{n}"), &stored, Some(&comm))?;
+            match parsed.kind {
+                BinaryKind::S => {
+                    h.write_fixed_double(&format!("TZERO{n}"), -128.0, 0, Some(COMM_TZERO_SBYTE))?;
+                    h.write_fixed_double(&format!("TSCAL{n}"), 1.0, 0, Some(COMM_TSCAL_BIN))?;
+                }
+                BinaryKind::U => {
+                    h.write_fixed_double(
+                        &format!("TZERO{n}"),
+                        32768.0,
+                        0,
+                        Some(COMM_TZERO_UNSIGNED),
+                    )?;
+                    h.write_fixed_double(&format!("TSCAL{n}"), 1.0, 0, Some(COMM_TSCAL_BIN))?;
+                }
+                BinaryKind::V => {
+                    h.write_fixed_double(
+                        &format!("TZERO{n}"),
+                        2_147_483_648.0,
+                        0,
+                        Some(COMM_TZERO_UNSIGNED),
+                    )?;
+                    h.write_fixed_double(&format!("TSCAL{n}"), 1.0, 0, Some(COMM_TSCAL_BIN))?;
+                }
+                BinaryKind::W => {
+                    let name = format!("TZERO{n}");
+                    let card =
+                        format!("{name:<8}=  9223372036854775808 / offset for unsigned integers");
+                    h.push(Card::from_text(&card));
+                    h.write_fixed_double(&format!("TSCAL{n}"), 1.0, 0, Some(COMM_TSCAL_BIN))?;
+                }
+                _ => {}
+            }
+            if let Some(&Some(unit)) = tunit.get(ii) {
+                if !unit.is_empty() {
+                    h.write_string(&format!("TUNIT{n}"), unit, Some(COMM_TUNIT))?;
+                }
+            }
+        }
+        if let Some(name) = extname {
+            if !name.is_empty() {
+                h.write_string("EXTNAME", name, Some(COMM_EXTNAME_BIN))?;
+            }
+        }
+        Ok(h)
+    }
+
+    /// Binary-table required keywords (`fits_read_btblhdr` / `ffghbn`).
+    pub fn binary_table_info(&self) -> Result<BinaryTableInfo> {
+        let first = self
+            .cards
+            .first()
+            .ok_or_else(|| FitsError::new(NO_XTENSION))?;
+        let (fname, _) = first.keyword_name()?;
+        if !fname.eq_ignore_ascii_case("XTENSION") {
+            return Err(FitsError::new(NO_XTENSION));
+        }
+        let (xt, _) = self.get_string("XTENSION")?;
+        let xt = xt.trim();
+        if xt != "BINTABLE" && xt != "A3DTABLE" && xt != "3DTABLE" {
+            return Err(FitsError::new(NOT_BTABLE));
+        }
+        let rowlen = self.get_i64("NAXIS1")?;
+        let nrows = self.get_i64("NAXIS2")?;
+        let pcount = self.get_i64("PCOUNT").unwrap_or(0);
+        let tfields_i = self.get_i64("TFIELDS")?;
+        if !(0..=999).contains(&tfields_i) {
+            return Err(FitsError::new(BAD_TFIELDS));
+        }
+        let tfields = tfields_i as i32;
+        let mut ttype = Vec::new();
+        let mut tform = Vec::new();
+        let mut tunit = Vec::new();
+        for i in 1..=tfields {
+            ttype.push(
+                self.get_string(&format!("TTYPE{i}"))
+                    .map(|(v, _)| v)
+                    .unwrap_or_default(),
+            );
+            tform.push(
+                self.get_string(&format!("TFORM{i}"))
+                    .map(|(v, _)| v)
+                    .map_err(|_| FitsError::new(NO_TFORM))?,
+            );
+            tunit.push(
+                self.get_string(&format!("TUNIT{i}"))
+                    .map(|(v, _)| v)
+                    .unwrap_or_default(),
+            );
+        }
+        let extname = self
+            .get_string("EXTNAME")
+            .map(|(v, _)| v)
+            .unwrap_or_default();
+        Ok(BinaryTableInfo {
+            nrows,
+            tfields,
+            ttype,
+            tform,
+            tunit,
+            extname,
+            pcount,
+            rowlen,
         })
     }
 

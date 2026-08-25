@@ -244,17 +244,20 @@ impl FitsFile {
     }
 
     fn flush_inner(&mut self) -> Result<()> {
-        let inner = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| FitsError::new(BAD_FILEPTR))?;
-        if !inner.writable {
-            return if inner.dirty {
+        let writable = self.inner()?.writable;
+        let dirty = self.inner()?.dirty;
+        let is_bin = self.inner()?.hdus[self.inner()?.current].hdu_type == HduType::BinaryTable;
+        if !writable {
+            return if dirty {
                 Err(FitsError::new(READONLY_FILE))
             } else {
-                inner.io.flush()
+                self.inner_mut()?.io.flush()
             };
         }
+        if is_bin {
+            self.sync_binary_heap_keywords()?;
+        }
+        let inner = self.inner_mut()?;
         if inner.dirty {
             flush_header_and_maybe_shift(inner)?;
             inner.dirty = false;

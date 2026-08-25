@@ -281,6 +281,31 @@ unsafe extern "C" {
         tbcol: *mut c_long,
         status: *mut c_int,
     ) -> c_int;
+    fn ffbnfm(
+        tform: *mut c_char,
+        dtcode: *mut c_int,
+        trepeat: *mut c_long,
+        twidth: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpcll(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        array: *mut c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpclx(
+        fptr: *mut c_void,
+        colnum: c_int,
+        frow: c_longlong,
+        fbit: c_long,
+        nbit: c_long,
+        larray: *mut c_char,
+        status: *mut c_int,
+    ) -> c_int;
 }
 
 pub const ASCII_TBL: c_int = 1;
@@ -1071,6 +1096,49 @@ impl CFile {
         status as i32
     }
 
+    /// `ffpcll`.
+    pub fn write_col_log(&mut self, colnum: i32, firstrow: i64, values: &[bool]) -> i32 {
+        let _g = lock();
+        let mut data: Vec<c_char> = values.iter().map(|&v| i8::from(v) as c_char).collect();
+        let mut status: c_int = 0;
+        unsafe {
+            ffpcll(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                values.len() as c_longlong,
+                data.as_mut_ptr(),
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffpclx`, one bit per row (scalar `1X` columns).
+    pub fn write_col_bit(&mut self, colnum: i32, firstrow: i64, values: &[bool]) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        for (i, &v) in values.iter().enumerate() {
+            let mut data = [i8::from(v) as c_char];
+            unsafe {
+                ffpclx(
+                    self.fptr,
+                    colnum as c_int,
+                    (firstrow + i as i64) as c_longlong,
+                    1,
+                    1,
+                    data.as_mut_ptr(),
+                    &raw mut status,
+                );
+            }
+            if status != 0 {
+                break;
+            }
+        }
+        status as i32
+    }
+
     /// `ffmahd`.
     pub fn movabs_hdu(&mut self, hdunum: i32) -> i32 {
         let _g = lock();
@@ -1151,6 +1219,36 @@ pub fn ffasfm_parse(tform: &str) -> Result<(i32, i64, i32), i32> {
         Err(status as i32)
     } else {
         Ok((dtcode as i32, twidth as i64, decimals as i32))
+    }
+}
+
+/// `ffbnfm`. Returns `(datacode, repeat, width)`.
+pub fn ffbnfm_parse(tform: &str) -> Result<(i32, i64, i64), i32> {
+    let _g = lock();
+    let mut buf = {
+        let mut v = CString::new(tform)
+            .expect("tform contains NUL")
+            .into_bytes_with_nul();
+        v.resize(FLEN_VALUE, 0);
+        v
+    };
+    let mut dtcode: c_int = 0;
+    let mut trepeat: c_long = 0;
+    let mut twidth: c_long = 0;
+    let mut status: c_int = 0;
+    unsafe {
+        ffbnfm(
+            buf.as_mut_ptr().cast::<c_char>(),
+            &raw mut dtcode,
+            &raw mut trepeat,
+            &raw mut twidth,
+            &raw mut status,
+        );
+    }
+    if status != 0 {
+        Err(status as i32)
+    } else {
+        Ok((dtcode as i32, trepeat as i64, twidth as i64))
     }
 }
 

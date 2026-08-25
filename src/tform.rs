@@ -1,10 +1,13 @@
-//! ASCII-table TFORM parsing (`ffasfm`), column spacing (`ffgabc`),
-//! and C `printf`-compatible field formatting (`ffcfmt`).
+//! ASCII-table TFORM parsing (`ffasfm`), binary TFORM (`ffbnfm`),
+//! column spacing (`ffgabc`), and C `printf`-compatible field formatting.
 
 use crate::card::format_exp_double;
 use crate::error::{FitsError, Result};
 use crate::status::{BAD_TFORM, BAD_TFORM_DTYPE, NUM_OVERFLOW};
-use crate::types::{FLEN_VALUE, TDOUBLE, TFLOAT, TLONG, TSHORT, TSTRING};
+use crate::types::{
+    FLEN_VALUE, TBIT, TBYTE, TCOMPLEX, TDBLCOMPLEX, TDOUBLE, TFLOAT, TLOGICAL, TLONG, TLONGLONG,
+    TSBYTE, TSHORT, TSTRING, TULONG, TULONGLONG, TUSHORT,
+};
 
 /// ASCII-table TFORM letter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +330,262 @@ fn parse_c_double(s: &str) -> Result<f64> {
         .map_err(|_| FitsError::new(BAD_TFORM))
 }
 
+/// Binary-table TFORM letter (after optional repeat and `P`/`Q`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryKind {
+    /// Logical `L`.
+    L,
+    /// Bit `X`.
+    X,
+    /// Unsigned byte `B`.
+    B,
+    /// Signed byte `S` (stored as `B` + TZERO = -128).
+    S,
+    /// Int16 `I`.
+    I,
+    /// UInt16 `U` (stored as `I` + TZERO = 32768).
+    U,
+    /// Int32 `J`.
+    J,
+    /// UInt32 `V` (stored as `J` + TZERO = 2^31).
+    V,
+    /// Int64 `K`.
+    K,
+    /// UInt64 `W` (stored as `K` + TZERO = 2^63).
+    W,
+    /// ASCII `A`.
+    A,
+    /// Float32 `E`.
+    E,
+    /// Float64 `D`.
+    D,
+    /// Complex64 `C`.
+    C,
+    /// Complex128 `M`.
+    M,
+}
+
+/// Variable-length descriptor kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableKind {
+    /// Fixed-length column.
+    None,
+    /// 32-bit descriptor (`P`).
+    P,
+    /// 64-bit descriptor (`Q`).
+    Q,
+}
+
+/// Parsed binary `TFORMn` (`ffbnfm`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinaryTform {
+    /// Repeat count (1 if omitted).
+    pub repeat: i64,
+    /// Type letter.
+    pub kind: BinaryKind,
+    /// `P` / `Q` / fixed.
+    pub variable: VariableKind,
+    /// Element width in bytes (string unit width for `A`; 1 for bits).
+    pub width: usize,
+    /// CFITSIO datatype code (negative if variable).
+    pub datacode: i32,
+}
+
+impl BinaryTform {
+    /// `fits_binary_tform` / `ffbnfm`.
+    pub fn parse(tform: &str) -> Result<Self> {
+        parse_binary_tform(tform)
+    }
+
+    /// Bytes occupied in the fixed part of a table row.
+    #[must_use]
+    pub fn row_nbytes(self) -> usize {
+        match self.variable {
+            VariableKind::P => 8,
+            VariableKind::Q => 16,
+            VariableKind::None => match self.kind {
+                BinaryKind::X => (self.repeat as usize).div_ceil(8),
+                BinaryKind::A => self.repeat as usize,
+                _ => self.repeat as usize * self.elem_nbytes(),
+            },
+        }
+    }
+
+    /// Bytes per stored element (heap element for VLA).
+    #[must_use]
+    pub fn elem_nbytes(self) -> usize {
+        match self.kind {
+            BinaryKind::L | BinaryKind::B | BinaryKind::S | BinaryKind::A | BinaryKind::X => 1,
+            BinaryKind::I | BinaryKind::U => 2,
+            BinaryKind::J | BinaryKind::V | BinaryKind::E => 4,
+            BinaryKind::K | BinaryKind::W | BinaryKind::D | BinaryKind::C => 8,
+            BinaryKind::M => 16,
+        }
+    }
+
+    /// True if this is a `P`/`Q` variable-length column.
+    #[must_use]
+    pub fn is_variable(self) -> bool {
+        self.variable != VariableKind::None
+    }
+
+    /// TFORM comment suffix after `"data format of field"` (`ffphbn`).
+    ///
+    /// Signed-byte (`S`) gets no suffix (CFITSIO rewrites `S`→`B` without
+    /// appending `": BYTE"`).
+    #[must_use]
+    pub fn tform_comment_suffix(self) -> &'static str {
+        if self.is_variable() {
+            return ": variable length array";
+        }
+        match self.kind {
+            BinaryKind::A => ": ASCII Character",
+            BinaryKind::X => ": BIT",
+            BinaryKind::B => ": BYTE",
+            BinaryKind::S => "",
+            BinaryKind::L => ": 1-byte LOGICAL",
+            BinaryKind::I | BinaryKind::U => ": 2-byte INTEGER",
+            BinaryKind::J | BinaryKind::V => ": 4-byte INTEGER",
+            BinaryKind::K | BinaryKind::W => ": 8-byte INTEGER",
+            BinaryKind::E => ": 4-byte REAL",
+            BinaryKind::D => ": 8-byte DOUBLE",
+            BinaryKind::C => ": COMPLEX",
+            BinaryKind::M => ": DOUBLE COMPLEX",
+        }
+    }
+
+    /// TFORM string stored in the header (`S`/`U`/`V`/`W` rewritten).
+    #[must_use]
+    pub fn stored_code(tform: &str) -> String {
+        let upper = tform.trim().to_ascii_uppercase();
+        let parsed = parse_binary_tform(&upper).ok();
+        let (from, to) = match parsed.map(|p| p.kind) {
+            Some(BinaryKind::S) => (b'S', b'B'),
+            Some(BinaryKind::U) => (b'U', b'I'),
+            Some(BinaryKind::V) => (b'V', b'J'),
+            Some(BinaryKind::W) => (b'W', b'K'),
+            _ => return upper,
+        };
+        let mut bytes = upper.into_bytes();
+        if let Some(i) = bytes.iter().position(|&c| c == from) {
+            bytes[i] = to;
+        }
+        String::from_utf8(bytes).unwrap_or_default()
+    }
+}
+
+/// Parse a binary-table TFORM (`ffbnfm`).
+pub fn parse_binary_tform(tform: &str) -> Result<BinaryTform> {
+    let trimmed = tform.trim_start();
+    if trimmed.is_empty() {
+        return Err(FitsError::new(BAD_TFORM));
+    }
+    if trimmed.len() > FLEN_VALUE - 1 {
+        return Err(FitsError::new(BAD_TFORM));
+    }
+    let form: String = trimmed.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let bytes = form.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let repeat = if i == 0 {
+        1i64
+    } else {
+        form[..i]
+            .parse::<i64>()
+            .map_err(|_| FitsError::new(BAD_TFORM))?
+    };
+    let rest = &form[i..];
+    if rest.is_empty() {
+        return Err(FitsError::new(BAD_TFORM_DTYPE));
+    }
+    let mut rbytes = rest.as_bytes();
+    let mut variable = VariableKind::None;
+    if rbytes[0] == b'P' {
+        variable = VariableKind::P;
+        rbytes = &rbytes[1..];
+    } else if rbytes[0] == b'Q' {
+        variable = VariableKind::Q;
+        rbytes = &rbytes[1..];
+    }
+    if rbytes.is_empty() {
+        return Err(FitsError::new(BAD_TFORM_DTYPE));
+    }
+    let (kind, mut datacode, mut width) = match rbytes[0] {
+        b'U' => (BinaryKind::U, TUSHORT, 2usize),
+        b'I' => (BinaryKind::I, TSHORT, 2),
+        b'V' => (BinaryKind::V, TULONG, 4),
+        b'W' => (BinaryKind::W, TULONGLONG, 8),
+        b'J' => (BinaryKind::J, TLONG, 4),
+        b'K' => (BinaryKind::K, TLONGLONG, 8),
+        b'E' => (BinaryKind::E, TFLOAT, 4),
+        b'D' => (BinaryKind::D, TDOUBLE, 8),
+        b'A' => (BinaryKind::A, TSTRING, repeat as usize),
+        b'L' => (BinaryKind::L, TLOGICAL, 1),
+        b'X' => (BinaryKind::X, TBIT, 1),
+        b'B' => (BinaryKind::B, TBYTE, 1),
+        b'S' => (BinaryKind::S, TSBYTE, 1),
+        b'C' => (BinaryKind::C, TCOMPLEX, 8),
+        b'M' => (BinaryKind::M, TDBLCOMPLEX, 16),
+        _ => {
+            return Err(FitsError::with_message(
+                BAD_TFORM_DTYPE,
+                format!("Illegal binary table TFORMn datatype: '{tform}' "),
+            ));
+        }
+    };
+    if kind == BinaryKind::A {
+        let after = rbytes.get(1..).unwrap_or(&[]);
+        let after = after.strip_prefix(b"(").unwrap_or(after);
+        if !after.is_empty() {
+            if let Ok(w) = parse_leading_long(after) {
+                let variable_a = variable != VariableKind::None;
+                if !variable_a && w > repeat {
+                    width = repeat as usize;
+                } else {
+                    width = w as usize;
+                }
+            }
+        }
+    }
+    if variable != VariableKind::None {
+        datacode = -datacode;
+    }
+    Ok(BinaryTform {
+        repeat,
+        kind,
+        variable,
+        width,
+        datacode,
+    })
+}
+
+/// Sum of per-row widths and 0-based byte offsets (`ffgtbc` analogue).
+pub fn binary_column_offsets(tforms: &[&str]) -> Result<(i64, Vec<i64>)> {
+    let mut off = 0i64;
+    let mut tb = Vec::with_capacity(tforms.len());
+    for tf in tforms {
+        tb.push(off);
+        off += parse_binary_tform(tf)?.row_nbytes() as i64;
+    }
+    Ok((off, tb))
+}
+
+fn parse_leading_long(bytes: &[u8]) -> Result<i64> {
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 {
+        return Err(FitsError::new(BAD_TFORM));
+    }
+    std::str::from_utf8(&bytes[..i])
+        .unwrap_or("0")
+        .parse::<i64>()
+        .map_err(|_| FitsError::new(BAD_TFORM))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +655,42 @@ mod tests {
         assert_eq!(format_ascii_number(1.25, &e).unwrap(), b"  1.25000E+00");
         assert_eq!(format_ascii_number(2.5e10, &e).unwrap(), b"  2.50000E+10");
         assert_eq!(format_ascii_number(-3.75e-4, &e).unwrap(), b" -3.75000E-04");
+    }
+
+    #[test]
+    fn parse_binary_tforms() {
+        let a = BinaryTform::parse("1A").unwrap();
+        assert_eq!(a.kind, BinaryKind::A);
+        assert_eq!(a.repeat, 1);
+        assert_eq!(a.datacode, TSTRING);
+        assert_eq!(a.row_nbytes(), 1);
+
+        let x = BinaryTform::parse("1X").unwrap();
+        assert_eq!(x.kind, BinaryKind::X);
+        assert_eq!(x.row_nbytes(), 1);
+
+        let j = BinaryTform::parse("J").unwrap();
+        assert_eq!(j.repeat, 1);
+        assert_eq!(j.datacode, TLONG);
+        assert_eq!(j.row_nbytes(), 4);
+
+        let pj = BinaryTform::parse("1PJ").unwrap();
+        assert_eq!(pj.variable, VariableKind::P);
+        assert_eq!(pj.datacode, -TLONG);
+        assert_eq!(pj.row_nbytes(), 8);
+
+        let qk = BinaryTform::parse("1QK").unwrap();
+        assert_eq!(qk.variable, VariableKind::Q);
+        assert_eq!(qk.row_nbytes(), 16);
+
+        let u = BinaryTform::parse("1U").unwrap();
+        assert_eq!(u.kind, BinaryKind::U);
+        assert_eq!(BinaryTform::stored_code("1U"), "1I");
+        assert_eq!(BinaryTform::stored_code("1S"), "1B");
+
+        let (naxis1, off) =
+            binary_column_offsets(&["1A", "1L", "1X", "1B", "1I", "1J", "1E", "1D"]).unwrap();
+        assert_eq!(naxis1, 22);
+        assert_eq!(off, vec![0, 1, 2, 3, 4, 6, 10, 14]);
     }
 }
