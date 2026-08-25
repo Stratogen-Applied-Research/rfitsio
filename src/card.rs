@@ -227,6 +227,35 @@ fn ascii_owned(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).unwrap_or_default()
 }
 
+/// CFITSIO `ffs2c`: quoted FITS string, padded to at least 8 characters.
+#[must_use]
+pub fn format_string_value(s: &str) -> String {
+    let mut inner = Vec::new();
+    for &b in s.as_bytes().iter().take(68) {
+        inner.push(b);
+        if b == b'\'' {
+            inner.push(b'\'');
+        }
+        if inner.len() >= 68 {
+            break;
+        }
+    }
+    while inner.len() < 8 {
+        inner.push(b' ');
+    }
+    let mut out = Vec::with_capacity(inner.len() + 2);
+    out.push(b'\'');
+    out.extend_from_slice(&inner);
+    out.push(b'\'');
+    ascii_owned(out)
+}
+
+/// CFITSIO `ffd2f`: fixed-point double (`%.{decim}f`).
+#[must_use]
+pub fn format_fixed_double(value: f64, decim: usize) -> String {
+    format!("{value:.decim$}")
+}
+
 /// `fits_test_keyword` / `fftkey`.
 pub fn test_keyword(keyword: &str) -> Result<()> {
     test_keyword_bytes(keyword.as_bytes(), false)

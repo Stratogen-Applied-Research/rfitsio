@@ -13,6 +13,7 @@ Layer A (core I/O) is under construction. Currently implemented:
 - CFITSIO status codes and `ffgerr` text
 - Header card format / parse / classify (`ffmkky`, `ffpsvc`, `ffgkcl`, `fftkey`)
 - Disk and memory I/O, `FitsFile` create/open/close, byte-identical empty primary HDU
+- Image HDUs: all BITPIX (including unsigned-via-BZERO), write/read, implicit conversion, subsets
 
 ## Development
 

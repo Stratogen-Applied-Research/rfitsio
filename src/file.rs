@@ -29,7 +29,7 @@ impl AccessMode {
     }
 }
 
-enum Backend {
+pub(crate) enum Backend {
     Disk(DiskDriver),
     Memory(MemoryDriver),
 }
@@ -67,13 +67,13 @@ impl Driver for Backend {
     }
 }
 
-struct Inner {
-    io: Backend,
-    writable: bool,
+pub(crate) struct Inner {
+    pub(crate) io: Backend,
+    pub(crate) writable: bool,
     path: Option<PathBuf>,
-    hdus: Vec<Hdu>,
-    current: usize,
-    dirty: bool,
+    pub(crate) hdus: Vec<Hdu>,
+    pub(crate) current: usize,
+    pub(crate) dirty: bool,
 }
 
 /// An open FITS file.
@@ -150,18 +150,13 @@ impl FitsFile {
         if bytes.is_empty() {
             return Err(FitsError::with_message(FILE_NOT_OPENED, "file is empty"));
         }
-        let (header, data_start) = Header::parse(&bytes)?;
-        let hdu = Hdu {
-            hdu_type: HduType::Image,
-            header,
-            data_start,
-        };
+        let hdus = parse_hdus(&bytes)?;
         Ok(Self {
             inner: Some(Inner {
                 io,
                 writable,
                 path: Some(path),
-                hdus: vec![hdu],
+                hdus,
                 current: 0,
                 dirty: false,
             }),
@@ -203,13 +198,13 @@ impl FitsFile {
         io::read_all(&mut self.inner_mut()?.io)
     }
 
-    fn inner(&self) -> Result<&Inner> {
+    pub(crate) fn inner(&self) -> Result<&Inner> {
         self.inner
             .as_ref()
             .ok_or_else(|| FitsError::new(BAD_FILEPTR))
     }
 
-    fn inner_mut(&mut self) -> Result<&mut Inner> {
+    pub(crate) fn inner_mut(&mut self) -> Result<&mut Inner> {
         self.inner
             .as_mut()
             .ok_or_else(|| FitsError::new(BAD_FILEPTR))
@@ -228,12 +223,13 @@ impl FitsFile {
             };
         }
         if inner.dirty {
-            let bytes = inner.hdus[inner.current].header.to_record_bytes();
-            io::write_all(&mut inner.io, &bytes)?;
+            let idx = inner.current;
+            let bytes = inner.hdus[idx].header.to_record_bytes();
+            let start = inner.hdus[idx].header_start;
+            inner.io.write_at(start, &bytes)?;
             inner.dirty = false;
-        } else {
-            inner.io.flush()?;
         }
+        inner.io.flush()?;
         Ok(())
     }
 }
@@ -243,6 +239,56 @@ impl Drop for FitsFile {
         let _ = self.flush_inner();
         self.inner.take();
     }
+}
+
+fn parse_hdus(bytes: &[u8]) -> Result<Vec<Hdu>> {
+    let mut hdus = Vec::new();
+    let mut offset = 0u64;
+    while (offset as usize) < bytes.len() {
+        let slice = &bytes[offset as usize..];
+        if slice.iter().all(|&b| b == 0) {
+            break;
+        }
+        let (header, header_len) = Header::parse(slice)?;
+        let hdu_type = hdu_type_from_header(&header);
+        let mut hdu = Hdu {
+            hdu_type,
+            header,
+            header_start: offset,
+            data_start: offset + header_len,
+        };
+        let data_unit = hdu.data_unit_len()?;
+        // `Header::parse` returns the padded header length as data_start.
+        hdu.data_start = offset + header_len;
+        hdus.push(hdu);
+        offset += header_len + data_unit;
+        if offset == 0 {
+            break;
+        }
+    }
+    if hdus.is_empty() {
+        return Err(FitsError::with_message(FILE_NOT_OPENED, "no HDUs found"));
+    }
+    Ok(hdus)
+}
+
+fn hdu_type_from_header(header: &Header) -> HduType {
+    if header.card_by_name("SIMPLE").is_some() {
+        return HduType::Image;
+    }
+    if let Ok(card) = header.get_i64("BITPIX") {
+        let _ = card;
+    }
+    if let Some(c) = header.card_by_name("XTENSION") {
+        let text = c.as_str().unwrap_or("");
+        if text.contains("TABLE") && !text.contains("BINTABLE") {
+            return HduType::AsciiTable;
+        }
+        if text.contains("BINTABLE") {
+            return HduType::BinaryTable;
+        }
+    }
+    HduType::Image
 }
 
 fn split_clobber(path: &Path) -> (PathBuf, bool) {

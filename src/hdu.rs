@@ -1,5 +1,6 @@
 //! Header Data Unit metadata.
 
+use crate::convert::pad_data_len;
 use crate::header::Header;
 use crate::types::HduType;
 
@@ -10,6 +11,8 @@ pub struct Hdu {
     pub hdu_type: HduType,
     /// Keyword cards for this HDU.
     pub header: Header,
+    /// Byte offset of the start of this HDU (header).
+    pub header_start: u64,
     /// Byte offset of the data unit (multiple of 2880).
     pub data_start: u64,
 }
@@ -22,7 +25,34 @@ impl Hdu {
         Ok(Self {
             hdu_type: HduType::Image,
             header,
+            header_start: 0,
             data_start,
         })
+    }
+
+    /// Unpadded data-unit size in bytes.
+    pub fn data_bytes(&self) -> crate::error::Result<u64> {
+        let naxes = self.header.naxes()?;
+        if naxes.is_empty() {
+            return Ok(0);
+        }
+        let bpp = self.header.image_type()?.bytes_per_pixel() as u64;
+        let npix = naxes.iter().try_fold(1u64, |acc, &n| {
+            u64::try_from(n)
+                .ok()
+                .and_then(|n| acc.checked_mul(n))
+                .ok_or_else(|| crate::error::FitsError::new(crate::status::ARRAY_TOO_BIG))
+        })?;
+        Ok(bpp.saturating_mul(npix))
+    }
+
+    /// Data unit size including 2880-byte padding (0 if no data).
+    pub fn data_unit_len(&self) -> crate::error::Result<u64> {
+        Ok(pad_data_len(self.data_bytes()?))
+    }
+
+    /// True if this is a null primary array (NAXIS = 0).
+    pub fn is_null_image(&self) -> bool {
+        self.hdu_type == HduType::Image && self.header.get_i64("NAXIS").unwrap_or(-1) == 0
     }
 }

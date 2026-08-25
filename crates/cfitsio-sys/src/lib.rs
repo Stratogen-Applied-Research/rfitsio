@@ -5,7 +5,16 @@
 
 #![allow(non_camel_case_types)]
 
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_longlong, c_void};
+use std::sync::Mutex;
+
+/// CFITSIO process-global state (I/O drivers, error stack) is not reentrant
+/// unless built with `_REENTRANT`. Serialise all oracle calls.
+static CFITSIO_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    CFITSIO_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub const FLEN_CARD: usize = 81;
 pub const FLEN_VALUE: usize = 71;
@@ -48,11 +57,28 @@ unsafe extern "C" {
         naxes: *mut c_long,
         status: *mut c_int,
     ) -> c_int;
-    #[allow(dead_code)]
     fn ffopen(
         fptr: *mut *mut c_void,
         filename: *const c_char,
         iomode: c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffppr(
+        fptr: *mut c_void,
+        datatype: c_int,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        array: *mut c_void,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgpv(
+        fptr: *mut c_void,
+        datatype: c_int,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        nulval: *mut c_void,
+        array: *mut c_void,
+        anynul: *mut c_int,
         status: *mut c_int,
     ) -> c_int;
 }
@@ -64,6 +90,7 @@ fn cstr_to_string(buf: &[u8]) -> String {
 
 /// `fits_get_errstatus` / `ffgerr`.
 pub fn ffgerr_str(status: i32) -> String {
+    let _g = lock();
     let mut buf = [0u8; FLEN_ERRMSG];
     unsafe {
         ffgerr(status as c_int, buf.as_mut_ptr().cast::<c_char>());
@@ -73,12 +100,14 @@ pub fn ffgerr_str(status: i32) -> String {
 
 /// `fits_get_version` / `ffvers`.
 pub fn ffvers_f32() -> f32 {
+    let _g = lock();
     let mut v = 0.0f32;
     unsafe { ffvers(&raw mut v) }
 }
 
 /// `fits_make_key` / `ffmkky`. Returns `(card_without_trailing_blanks, status)`.
 pub fn ffmkky_str(keyname: &str, value: &str, comm: Option<&str>) -> (String, i32) {
+    let _g = lock();
     let key = CString::new(keyname).expect("keyname contains NUL");
     let mut val = CString::new(value)
         .expect("value contains NUL")
@@ -104,6 +133,7 @@ pub fn ffmkky_str(keyname: &str, value: &str, comm: Option<&str>) -> (String, i3
 
 /// `fits_parse_value` / `ffpsvc`.
 pub fn ffpsvc_str(card: &str) -> (String, String, i32) {
+    let _g = lock();
     let mut card_buf = {
         let mut v = CString::new(card)
             .expect("card contains NUL")
@@ -127,6 +157,7 @@ pub fn ffpsvc_str(card: &str) -> (String, String, i32) {
 
 /// `fits_test_keyword` / `fftkey`. `initial_status` is the inbound `*status`.
 pub fn fftkey_status(keyword: &str, initial_status: i32) -> i32 {
+    let _g = lock();
     let key = CString::new(keyword).expect("keyword contains NUL");
     let mut status = initial_status as c_int;
     unsafe {
@@ -137,6 +168,7 @@ pub fn fftkey_status(keyword: &str, initial_status: i32) -> i32 {
 
 /// `fits_test_record` / `fftrec`.
 pub fn fftrec_status(card: &str, initial_status: i32) -> i32 {
+    let _g = lock();
     let mut buf = {
         let mut v = CString::new(card)
             .expect("card contains NUL")
@@ -153,6 +185,7 @@ pub fn fftrec_status(card: &str, initial_status: i32) -> i32 {
 
 /// `fits_get_keyclass` / `ffgkcl`.
 pub fn ffgkcl_i32(card: &str) -> i32 {
+    let _g = lock();
     let mut buf = {
         let mut v = CString::new(card)
             .expect("card contains NUL")
@@ -165,6 +198,7 @@ pub fn ffgkcl_i32(card: &str) -> i32 {
 
 /// `fits_get_keyname` / `ffgknm`.
 pub fn ffgknm_str(card: &str) -> (String, i32, i32) {
+    let _g = lock();
     let mut buf = {
         let mut v = CString::new(card)
             .expect("card contains NUL")
@@ -191,6 +225,7 @@ pub fn ffgknm_str(card: &str) -> (String, i32, i32) {
 /// This is CFITSIO's standard empty primary array: SIMPLE/BITPIX/NAXIS/EXTEND
 /// plus the two FITS-definition COMMENT cards, END, and space fill to 2880.
 pub fn write_empty_primary(path: &str) -> Result<(), i32> {
+    let _g = lock();
     let cpath = CString::new(path).map_err(|_| 105)?;
     let mut fptr: *mut c_void = std::ptr::null_mut();
     let mut status: c_int = 0;
@@ -214,6 +249,7 @@ pub fn write_empty_primary(path: &str) -> Result<(), i32> {
 
 /// `fits_create_file` + `fits_close_file` with no keywords written.
 pub fn create_and_close(path: &str) -> Result<(), i32> {
+    let _g = lock();
     let cpath = CString::new(path).map_err(|_| 105)?;
     let mut fptr: *mut c_void = std::ptr::null_mut();
     let mut status: c_int = 0;
@@ -229,4 +265,85 @@ pub fn create_and_close(path: &str) -> Result<(), i32> {
     } else {
         Ok(())
     }
+}
+
+/// `ffinit` + `ffphps` + `ffppr` + `ffclos`.
+pub fn write_primary_image<T>(
+    path: &str,
+    bitpix: i32,
+    naxes: &[i64],
+    datatype: i32,
+    data: &[T],
+) -> Result<(), i32> {
+    let _g = lock();
+    let cpath = CString::new(path).map_err(|_| 105)?;
+    let mut axes: Vec<c_long> = naxes.iter().map(|&n| n as c_long).collect();
+    let mut fptr: *mut c_void = std::ptr::null_mut();
+    let mut status: c_int = 0;
+    unsafe {
+        ffinit(&raw mut fptr, cpath.as_ptr(), &raw mut status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        let naxis = naxes.len() as c_int;
+        let axes_ptr = if axes.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            axes.as_mut_ptr()
+        };
+        ffphps(fptr, bitpix as c_int, naxis, axes_ptr, &raw mut status);
+        if status == 0 && !data.is_empty() {
+            ffppr(
+                fptr,
+                datatype as c_int,
+                1,
+                data.len() as c_longlong,
+                data.as_ptr().cast::<c_void>().cast_mut(),
+                &raw mut status,
+            );
+        }
+        let mut close_status = status;
+        ffclos(fptr, &raw mut close_status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        if close_status != 0 {
+            return Err(close_status as i32);
+        }
+    }
+    Ok(())
+}
+
+/// `ffopen` + `ffgpv` + `ffclos`.
+pub fn read_primary_image<T>(path: &str, datatype: i32, out: &mut [T]) -> Result<i32, i32> {
+    let _g = lock();
+    let cpath = CString::new(path).map_err(|_| 104)?;
+    let mut fptr: *mut c_void = std::ptr::null_mut();
+    let mut status: c_int = 0;
+    let mut anynul: c_int = 0;
+    unsafe {
+        ffopen(&raw mut fptr, cpath.as_ptr(), 0, &raw mut status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        ffgpv(
+            fptr,
+            datatype as c_int,
+            1,
+            out.len() as c_longlong,
+            std::ptr::null_mut(),
+            out.as_mut_ptr().cast::<c_void>(),
+            &raw mut anynul,
+            &raw mut status,
+        );
+        let mut close_status = status;
+        ffclos(fptr, &raw mut close_status);
+        if status != 0 {
+            return Err(status as i32);
+        }
+        if close_status != 0 {
+            return Err(close_status as i32);
+        }
+    }
+    Ok(anynul as i32)
 }

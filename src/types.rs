@@ -60,6 +60,111 @@ pub const TYP_COMM_KEY: i32 = 130;
 pub const TYP_CONT_KEY: i32 = 140;
 pub const TYP_USER_KEY: i32 = 150;
 
+/// Image BITPIX / CFITSIO unsigned-image codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageType {
+    /// `BYTE_IMG` / BITPIX = 8.
+    U8,
+    /// `SBYTE_IMG` / BITPIX = 8 + BZERO = -128.
+    I8,
+    /// `SHORT_IMG` / BITPIX = 16.
+    I16,
+    /// `USHORT_IMG` / BITPIX = 16 + BZERO = 32768.
+    U16,
+    /// `LONG_IMG` / BITPIX = 32.
+    I32,
+    /// `ULONG_IMG` / BITPIX = 32 + BZERO = 2^31.
+    U32,
+    /// `LONGLONG_IMG` / BITPIX = 64.
+    I64,
+    /// `ULONGLONG_IMG` / BITPIX = 64 + BZERO = 2^63.
+    U64,
+    /// `FLOAT_IMG` / BITPIX = -32.
+    F32,
+    /// `DOUBLE_IMG` / BITPIX = -64.
+    F64,
+}
+
+impl ImageType {
+    /// CFITSIO `ffcrim` / `ffphps` bitpix argument (includes 10/20/40/80).
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::U8 => BYTE_IMG,
+            Self::I8 => SBYTE_IMG,
+            Self::I16 => SHORT_IMG,
+            Self::U16 => USHORT_IMG,
+            Self::I32 => LONG_IMG,
+            Self::U32 => ULONG_IMG,
+            Self::I64 => LONGLONG_IMG,
+            Self::U64 => ULONGLONG_IMG,
+            Self::F32 => FLOAT_IMG,
+            Self::F64 => DOUBLE_IMG,
+        }
+    }
+
+    /// BITPIX actually stored in the header.
+    #[must_use]
+    pub const fn bitpix(self) -> i32 {
+        match self {
+            Self::U8 | Self::I8 => 8,
+            Self::I16 | Self::U16 => 16,
+            Self::I32 | Self::U32 => 32,
+            Self::I64 | Self::U64 => 64,
+            Self::F32 => -32,
+            Self::F64 => -64,
+        }
+    }
+
+    /// Bytes per stored pixel.
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self.bitpix().unsigned_abs() {
+            8 => 1,
+            16 => 2,
+            32 => 4,
+            64 => 8,
+            _ => 1,
+        }
+    }
+
+    /// Default BSCALE.
+    #[must_use]
+    pub const fn bscale(self) -> f64 {
+        1.0
+    }
+
+    /// Default BZERO for unsigned / signed-byte images.
+    #[must_use]
+    pub const fn bzero(self) -> f64 {
+        match self {
+            Self::I8 => -128.0,
+            Self::U16 => 32768.0,
+            Self::U32 => 2_147_483_648.0,
+            Self::U64 => 9_223_372_036_854_775_808.0,
+            _ => 0.0,
+        }
+    }
+
+    /// Parse a CFITSIO image-type code (including 10/20/40/80).
+    #[must_use]
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            BYTE_IMG => Some(Self::U8),
+            SBYTE_IMG => Some(Self::I8),
+            SHORT_IMG => Some(Self::I16),
+            USHORT_IMG => Some(Self::U16),
+            LONG_IMG => Some(Self::I32),
+            ULONG_IMG => Some(Self::U32),
+            LONGLONG_IMG => Some(Self::I64),
+            ULONGLONG_IMG => Some(Self::U64),
+            FLOAT_IMG => Some(Self::F32),
+            DOUBLE_IMG => Some(Self::F64),
+            _ => None,
+        }
+    }
+}
+
 pub const BYTE_IMG: i32 = 8;
 pub const SHORT_IMG: i32 = 16;
 pub const LONG_IMG: i32 = 32;
