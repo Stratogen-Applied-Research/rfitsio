@@ -8,7 +8,7 @@ License: Apache-2.0 OR MIT. Error-message wording reproduced from CFITSIO is cov
 
 ## Status
 
-Layer A (core I/O) is under construction. Currently implemented:
+Layer A (core I/O) and Layer B (tiled image compression) are implemented:
 
 - CFITSIO status codes and `ffgerr` text
 - Header card format / parse / classify (`ffmkky`, `ffpsvc`, `ffgkcl`, `fftkey`)
@@ -22,6 +22,7 @@ Layer A (core I/O) is under construction. Currently implemented:
 - gzip `.gz` read/write (pure-Rust `flate2`), stdin/stdout and `write_hdu_to` streams
 - Cookbook example (`cargo run --example cookbook`) matching CFITSIO `cookbook.out`
 - `testprog` gate: checksum encode/decode, WCS `-TAN`, missing-file and HDU-move status codes locked to `testprog.out`
+- Tiled compressed images (`ZIMAGE`): `RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1`, `HCOMPRESS_1`, lossless float gzip (`ZQUANTIZ=NONE`), and quantized floats with subtractive dither. Pixel identity after funpack / CFITSIO `fits_read_img` is the gate.
 
 ## Development
 

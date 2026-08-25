@@ -370,6 +370,23 @@ unsafe extern "C" {
         hdusum: *mut c_ulong,
         status: *mut c_int,
     ) -> c_int;
+    fn fits_set_compression_type(fptr: *mut c_void, ctype: c_int, status: *mut c_int) -> c_int;
+    fn fits_is_compressed_image(fptr: *mut c_void, status: *mut c_int) -> c_int;
+    fn ffcrim(
+        fptr: *mut c_void,
+        bitpix: c_int,
+        naxis: c_int,
+        naxes: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
+    fn fits_set_quantize_level(fptr: *mut c_void, qlevel: f32, status: *mut c_int) -> c_int;
+    fn fits_set_hcomp_scale(fptr: *mut c_void, scale: f32, status: *mut c_int) -> c_int;
+    fn fits_set_tile_dim(
+        fptr: *mut c_void,
+        ndim: c_int,
+        dims: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
 }
 
 pub const ASCII_TBL: c_int = 1;
@@ -1289,6 +1306,121 @@ impl CFile {
             Err(status as i32)
         } else {
             Ok(hdutype as i32)
+        }
+    }
+
+    /// `fits_set_compression_type`.
+    pub fn set_compression_type(&mut self, ctype: i32) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { fits_set_compression_type(self.fptr, ctype as c_int, &raw mut status) };
+        status as i32
+    }
+
+    /// `fits_set_quantize_level`.
+    pub fn set_quantize_level(&mut self, qlevel: f32) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { fits_set_quantize_level(self.fptr, qlevel, &raw mut status) };
+        status as i32
+    }
+
+    /// `fits_set_hcomp_scale`.
+    pub fn set_hcomp_scale(&mut self, scale: f32) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { fits_set_hcomp_scale(self.fptr, scale, &raw mut status) };
+        status as i32
+    }
+
+    /// `fits_set_tile_dim`.
+    pub fn set_tile_dim(&mut self, dims: &[i64]) -> i32 {
+        let _g = lock();
+        let mut d: Vec<c_long> = dims.iter().map(|&n| n as c_long).collect();
+        let mut status: c_int = 0;
+        unsafe {
+            fits_set_tile_dim(
+                self.fptr,
+                dims.len() as c_int,
+                d.as_mut_ptr(),
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffcrim`.
+    pub fn create_img(&mut self, bitpix: i32, naxes: &[i64]) -> i32 {
+        let _g = lock();
+        let mut axes: Vec<c_long> = naxes.iter().map(|&n| n as c_long).collect();
+        let mut status: c_int = 0;
+        let naxis = naxes.len() as c_int;
+        let ptr = if axes.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            axes.as_mut_ptr()
+        };
+        unsafe { ffcrim(self.fptr, bitpix as c_int, naxis, ptr, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffppr`.
+    pub fn write_img<T>(&mut self, datatype: i32, firstelem: i64, data: &[T]) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        if !data.is_empty() {
+            unsafe {
+                ffppr(
+                    self.fptr,
+                    datatype as c_int,
+                    firstelem as c_longlong,
+                    data.len() as c_longlong,
+                    data.as_ptr().cast::<c_void>().cast_mut(),
+                    &raw mut status,
+                );
+            }
+        }
+        status as i32
+    }
+
+    /// `ffgpv` from the current HDU.
+    pub fn read_img<T>(
+        &mut self,
+        datatype: i32,
+        firstelem: i64,
+        out: &mut [T],
+    ) -> Result<i32, i32> {
+        let _g = lock();
+        let mut status: c_int = 0;
+        let mut anynul: c_int = 0;
+        unsafe {
+            ffgpv(
+                self.fptr,
+                datatype as c_int,
+                firstelem as c_longlong,
+                out.len() as c_longlong,
+                std::ptr::null_mut(),
+                out.as_mut_ptr().cast::<c_void>(),
+                &raw mut anynul,
+                &raw mut status,
+            );
+        }
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok(anynul as i32)
+        }
+    }
+
+    /// `fits_is_compressed_image`.
+    pub fn is_compressed_image(&mut self) -> Result<bool, i32> {
+        let _g = lock();
+        let mut status: c_int = 0;
+        let v = unsafe { fits_is_compressed_image(self.fptr, &raw mut status) };
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok(v != 0)
         }
     }
 

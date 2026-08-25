@@ -577,7 +577,13 @@ impl FitsFile {
         Ok(())
     }
 
-    fn write_vla_bytes(&mut self, colnum: i32, row: i64, bytes: &[u8], nelem: i64) -> Result<()> {
+    pub(crate) fn write_vla_bytes(
+        &mut self,
+        colnum: i32,
+        row: i64,
+        bytes: &[u8],
+        nelem: i64,
+    ) -> Result<()> {
         if row < 1 {
             return Err(FitsError::new(BAD_ROW_NUM));
         }
@@ -614,7 +620,7 @@ impl FitsFile {
         Ok(())
     }
 
-    fn read_vla_bytes(&mut self, colnum: i32, row: i64) -> Result<Vec<u8>> {
+    pub(crate) fn read_vla_bytes(&mut self, colnum: i32, row: i64) -> Result<Vec<u8>> {
         let col = self.bin_col(colnum)?;
         let (len, heap_off) = self.read_descriptor(colnum, row)?;
         if len <= 0 {
@@ -666,7 +672,7 @@ impl FitsFile {
         Ok(())
     }
 
-    fn read_descriptor(&mut self, colnum: i32, row: i64) -> Result<(i64, i64)> {
+    pub(crate) fn read_descriptor(&mut self, colnum: i32, row: i64) -> Result<(i64, i64)> {
         let col = self.bin_col(colnum)?;
         let (data_start, rowlen) = self.table_geom()?;
         let pos = data_start + ((row - 1) as u64) * rowlen + col.offset;

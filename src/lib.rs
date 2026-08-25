@@ -10,6 +10,7 @@
 pub mod bintable;
 pub mod card;
 pub mod checksum;
+pub mod compress;
 pub mod convert;
 pub mod datetime;
 pub mod edithdu;
@@ -34,6 +35,7 @@ pub use checksum::{
     add_checksum_record, decode_checksum, encode_checksum, fits_decode_chksum, fits_encode_chksum,
     fits_get_chksum, fits_update_chksum, fits_verify_chksum, fits_write_chksum,
 };
+pub use compress::{CompressionType, fits_is_compressed_image, fits_set_compression_type};
 pub use edithdu::{
     fits_copy_data, fits_copy_file, fits_copy_hdu, fits_copy_header, fits_create_hdu,
     fits_delete_hdu, fits_insert_atbl, fits_insert_btbl, fits_insert_img, fits_write_hdu,
@@ -52,7 +54,8 @@ pub use tform::{
     binary_column_offsets, parse_ascii_tform, parse_binary_tform,
 };
 pub use types::{
-    CARD_LEN, CFITSIO_MAJOR, CFITSIO_MICRO, CFITSIO_MINOR, HduType, ImageType, KeyClass,
-    RECORD_LEN, cfitsio_version_float,
+    CARD_LEN, CFITSIO_MAJOR, CFITSIO_MICRO, CFITSIO_MINOR, GZIP_1, GZIP_2, HCOMPRESS_1, HduType,
+    ImageType, KeyClass, NO_DITHER, NO_QUANTIZE, NOCOMPRESS, PLIO_1, RECORD_LEN, RICE_1,
+    SUBTRACTIVE_DITHER_1, SUBTRACTIVE_DITHER_2, cfitsio_version_float,
 };
 pub use wcs::{pix_to_world, read_img_coord, world_to_pix};

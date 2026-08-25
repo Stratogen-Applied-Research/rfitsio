@@ -83,6 +83,8 @@ pub(crate) struct Inner {
     emit_stdout: bool,
     /// 1-based next header record to read (`ffghps` position).
     pub(crate) nextkey: usize,
+    /// Requested tiled-image compression for the next `create_image`.
+    pub(crate) compression: crate::compress::CompressionRequest,
 }
 
 impl Inner {
@@ -165,6 +167,7 @@ impl FitsFile {
                     gzip_out: Some(path),
                     emit_stdout: false,
                     nextkey: 1,
+                    compression: crate::compress::CompressionRequest::default(),
                 }),
             });
         }
@@ -183,6 +186,7 @@ impl FitsFile {
                 gzip_out: None,
                 emit_stdout: false,
                 nextkey: 1,
+                compression: crate::compress::CompressionRequest::default(),
             }),
         })
     }
@@ -204,6 +208,7 @@ impl FitsFile {
                 gzip_out: None,
                 emit_stdout: false,
                 nextkey: 1,
+                compression: crate::compress::CompressionRequest::default(),
             }),
         })
     }
@@ -228,6 +233,7 @@ impl FitsFile {
                 gzip_out: None,
                 emit_stdout: false,
                 nextkey: 1,
+                compression: crate::compress::CompressionRequest::default(),
             }),
         })
     }
@@ -269,6 +275,7 @@ impl FitsFile {
                     gzip_out,
                     emit_stdout: false,
                     nextkey: 1,
+                    compression: crate::compress::CompressionRequest::default(),
                 }),
             });
         }
@@ -288,6 +295,7 @@ impl FitsFile {
                 gzip_out: None,
                 emit_stdout: false,
                 nextkey: 1,
+                compression: crate::compress::CompressionRequest::default(),
             }),
         })
     }
@@ -311,9 +319,12 @@ impl FitsFile {
     }
 
     /// Type of the current HDU.
+    ///
+    /// A tiled compressed image (`ZIMAGE = T`) is reported as [`HduType::Image`]
+    /// even though it is stored as a binary table.
     pub fn hdu_type(&self) -> Result<HduType> {
         let inner = self.inner()?;
-        Ok(inner.hdus[inner.current].hdu_type)
+        Ok(logical_hdu_type(&inner.hdus[inner.current]))
     }
 
     /// 1-based current HDU number (`fits_get_hdu_num` / `ffghdn`).
@@ -336,7 +347,7 @@ impl FitsFile {
         }
         inner.current = hdunum - 1;
         inner.nextkey = 1;
-        Ok(inner.hdus[inner.current].hdu_type)
+        Ok(logical_hdu_type(&inner.hdus[inner.current]))
     }
 
     /// `fits_movrel_hdu` / `ffmrhd`.
@@ -355,7 +366,7 @@ impl FitsFile {
         let inner = self.inner()?;
         let mut found = None;
         for (i, hdu) in inner.hdus.iter().enumerate() {
-            if hdutype >= 0 && hdu.hdu_type.code() != hdutype {
+            if hdutype >= 0 && logical_hdu_type(hdu).code() != hdutype {
                 continue;
             }
             let name = hdu
@@ -377,7 +388,7 @@ impl FitsFile {
         let inner = self.inner_mut()?;
         inner.current = idx;
         inner.nextkey = 1;
-        Ok(inner.hdus[idx].hdu_type)
+        Ok(logical_hdu_type(&inner.hdus[idx]))
     }
 
     /// `fits_file_name` / `ffflnm`.
@@ -592,6 +603,14 @@ fn parse_hdus(bytes: &[u8]) -> Result<Vec<Hdu>> {
         return Err(FitsError::with_message(FILE_NOT_OPENED, "no HDUs found"));
     }
     Ok(hdus)
+}
+
+pub(crate) fn logical_hdu_type(hdu: &Hdu) -> HduType {
+    if hdu.header.is_compressed_image() {
+        HduType::Image
+    } else {
+        hdu.hdu_type
+    }
 }
 
 fn hdu_type_from_header(header: &Header) -> HduType {

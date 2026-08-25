@@ -112,6 +112,9 @@ impl FitsFile {
     /// Otherwise a new IMAGE extension is appended.
     pub fn create_image(&mut self, ty: ImageType, naxes: &[i64]) -> Result<()> {
         self.require_write()?;
+        if self.compression_requested() && !naxes.is_empty() {
+            return self.create_compressed_image(ty, naxes);
+        }
         let replace = {
             let inner = self.inner()?;
             inner.current == 0
@@ -180,6 +183,9 @@ impl FitsFile {
         if firstelem < 1 {
             return Err(FitsError::new(BAD_ELEM_NUM));
         }
+        if self.is_compressed_image()? {
+            return self.write_compressed_pixels(firstelem, data);
+        }
         let (ty, bscale, bzero, data_start, npix, bpp) = self.image_layout()?;
         let nelem = data.len() as i64;
         if firstelem - 1 + nelem > npix {
@@ -202,6 +208,9 @@ impl FitsFile {
         }
         if firstelem < 1 {
             return Err(FitsError::new(BAD_ELEM_NUM));
+        }
+        if self.is_compressed_image()? {
+            return self.read_compressed_pixels(firstelem, nelem);
         }
         let (ty, bscale, bzero, data_start, npix, bpp) = self.image_layout()?;
         if firstelem - 1 + nelem as i64 > npix {
@@ -283,6 +292,11 @@ impl FitsFile {
     pub fn image_size(&self) -> Result<(ImageType, Vec<i64>)> {
         let inner = self.inner()?;
         let hdu = &inner.hdus[inner.current];
+        if hdu.header.is_compressed_image() {
+            let nrows = hdu.header.get_i64("NAXIS2").unwrap_or(0);
+            let z = hdu.header.zimage_info(nrows)?;
+            return Ok((z.image_type()?, z.znaxis));
+        }
         if hdu.hdu_type != HduType::Image {
             return Err(FitsError::new(NOT_IMAGE));
         }
@@ -292,6 +306,19 @@ impl FitsFile {
     fn image_layout(&self) -> Result<(ImageType, f64, f64, u64, i64, usize)> {
         let inner = self.inner()?;
         let hdu = &inner.hdus[inner.current];
+        if hdu.header.is_compressed_image() {
+            let nrows = hdu.header.get_i64("NAXIS2").unwrap_or(0);
+            let z = hdu.header.zimage_info(nrows)?;
+            let ty = z.image_type()?;
+            return Ok((
+                ty,
+                z.bscale,
+                z.bzero,
+                hdu.data_start,
+                z.npix(),
+                z.bytes_per_pixel(),
+            ));
+        }
         if hdu.hdu_type != HduType::Image {
             return Err(FitsError::new(NOT_IMAGE));
         }
@@ -340,7 +367,12 @@ fn write_zeros(io: &mut dyn crate::io::Driver, pos: u64, len: u64) -> Result<()>
     Ok(())
 }
 
-fn encode_pixel<T: Pixel>(px: T, ty: ImageType, bscale: f64, bzero: f64) -> Result<Vec<u8>> {
+pub(crate) fn encode_pixel<T: Pixel>(
+    px: T,
+    ty: ImageType,
+    bscale: f64,
+    bzero: f64,
+) -> Result<Vec<u8>> {
     if (bscale - 1.0).abs() < f64::EPSILON {
         match (ty, T::datatype()) {
             (ImageType::U8, crate::types::TBYTE) if bzero == 0.0 => {
@@ -384,7 +416,12 @@ fn encode_pixel<T: Pixel>(px: T, ty: ImageType, bscale: f64, bzero: f64) -> Resu
     encode_physical(px.to_f64(), ty, bscale, bzero)
 }
 
-fn decode_pixel<T: Pixel>(bytes: &[u8], ty: ImageType, bscale: f64, bzero: f64) -> Result<T> {
+pub(crate) fn decode_pixel<T: Pixel>(
+    bytes: &[u8],
+    ty: ImageType,
+    bscale: f64,
+    bzero: f64,
+) -> Result<T> {
     if (bscale - 1.0).abs() < f64::EPSILON {
         match (ty, T::datatype()) {
             (ImageType::U8, crate::types::TBYTE) if bzero == 0.0 => {

@@ -187,6 +187,34 @@ pub const READWRITE: i32 = 1;
 pub const CASESEN: i32 = 1;
 pub const CASEINSEN: i32 = 0;
 
+/// Maximum number of axes in a tiled compressed image (`MAX_COMPRESS_DIM`).
+pub const MAX_COMPRESS_DIM: usize = 6;
+
+/// Rice coding (`RICE_1`).
+pub const RICE_1: i32 = 11;
+/// gzip of the raw tile bytes (`GZIP_1`).
+pub const GZIP_1: i32 = 21;
+/// byte-shuffle then gzip (`GZIP_2`).
+pub const GZIP_2: i32 = 22;
+/// IRAF pixel-list coding (`PLIO_1`).
+pub const PLIO_1: i32 = 31;
+/// H-transform coding (`HCOMPRESS_1`).
+pub const HCOMPRESS_1: i32 = 41;
+/// Internal CFITSIO test codec; not a public FITS type.
+pub const BZIP2_1: i32 = 51;
+/// Store tiles uncompressed (`NOCOMPRESS`).
+pub const NOCOMPRESS: i32 = -1;
+
+/// No dither when quantizing floats (`NO_DITHER`).
+pub const NO_DITHER: i32 = -1;
+/// Subtractive dithering, zeros treated as data (`SUBTRACTIVE_DITHER_1`).
+pub const SUBTRACTIVE_DITHER_1: i32 = 1;
+/// Subtractive dithering, exact zeros preserved (`SUBTRACTIVE_DITHER_2`).
+pub const SUBTRACTIVE_DITHER_2: i32 = 2;
+
+/// Sentinel meaning "do not quantize floats" (`NO_QUANTIZE` in `imcompress.c`).
+pub const NO_QUANTIZE: f32 = 9999.0;
+
 /// HDU class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HduType {
