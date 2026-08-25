@@ -87,6 +87,16 @@ impl Card {
     pub fn keyword_name(&self) -> Result<(String, usize)> {
         keyword_name(self.as_str().unwrap_or(""))
     }
+
+    /// Overwrite the 8-character keyword name (space-padded). Used when
+    /// shifting `Txxxn` indices (`ffkshf`).
+    pub fn set_keyword_name(&mut self, name: &str) {
+        let mut n = [b' '; 8];
+        let bytes = name.as_bytes();
+        let len = bytes.len().min(8);
+        n[..len].copy_from_slice(&bytes[..len]);
+        self.bytes[..8].copy_from_slice(&n);
+    }
 }
 
 impl AsRef<[u8]> for Card {

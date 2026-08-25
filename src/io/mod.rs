@@ -8,6 +8,7 @@ pub use memory::MemoryDriver;
 
 use crate::error::{FitsError, Result};
 use crate::status::{FILE_NOT_CLOSED, FILE_NOT_CREATED, FILE_NOT_OPENED, READ_ERROR, WRITE_ERROR};
+use crate::types::RECORD_LEN;
 
 // FILE_NOT_CLOSED is used by map_close_err (flush/close mapping, PR 2+).
 
@@ -77,4 +78,19 @@ pub fn write_all(driver: &mut dyn Driver, bytes: &[u8]) -> Result<()> {
     driver.write_at(0, bytes)?;
     driver.truncate(bytes.len() as u64)?;
     driver.flush()
+}
+
+/// Write `len` copies of `byte` starting at `pos`.
+pub(crate) fn write_fill(io: &mut dyn Driver, pos: u64, len: u64, byte: u8) -> Result<()> {
+    const CHUNK: usize = RECORD_LEN;
+    let buf = [byte; CHUNK];
+    let mut remaining = len;
+    let mut at = pos;
+    while remaining > 0 {
+        let n = remaining.min(CHUNK as u64) as usize;
+        io.write_at(at, &buf[..n])?;
+        at += n as u64;
+        remaining -= n as u64;
+    }
+    Ok(())
 }

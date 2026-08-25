@@ -157,7 +157,134 @@ unsafe extern "C" {
         anynul: *mut c_int,
         status: *mut c_int,
     ) -> c_int;
+    fn ffcrtb(
+        fptr: *mut c_void,
+        tbltype: c_int,
+        naxis2: c_longlong,
+        tfields: c_int,
+        ttype: *mut *mut c_char,
+        tform: *mut *mut c_char,
+        tunit: *mut *mut c_char,
+        extnm: *const c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpcls(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        array: *mut *mut c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpcljj(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        array: *mut c_longlong,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpcld(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        array: *mut f64,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffpcle(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        array: *mut f32,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgcvs(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        nulval: *mut c_char,
+        array: *mut *mut c_char,
+        anynul: *mut c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgcvjj(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        nulval: c_longlong,
+        array: *mut c_longlong,
+        anynul: *mut c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgcvd(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        nulval: f64,
+        array: *mut f64,
+        anynul: *mut c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffirow(
+        fptr: *mut c_void,
+        firstrow: c_longlong,
+        nrows: c_longlong,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffdrow(
+        fptr: *mut c_void,
+        firstrow: c_longlong,
+        nrows: c_longlong,
+        status: *mut c_int,
+    ) -> c_int;
+    fn fficol(
+        fptr: *mut c_void,
+        numcol: c_int,
+        ttype: *mut c_char,
+        tform: *mut c_char,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffdcol(fptr: *mut c_void, colnum: c_int, status: *mut c_int) -> c_int;
+    fn ffpclu(
+        fptr: *mut c_void,
+        colnum: c_int,
+        firstrow: c_longlong,
+        firstelem: c_longlong,
+        nelem: c_longlong,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffmahd(fptr: *mut c_void, hdunum: c_int, exttype: *mut c_int, status: *mut c_int) -> c_int;
+    fn ffasfm(
+        tform: *mut c_char,
+        dtcode: *mut c_int,
+        twidth: *mut c_long,
+        decimals: *mut c_int,
+        status: *mut c_int,
+    ) -> c_int;
+    fn ffgabc(
+        tfields: c_int,
+        tform: *mut *mut c_char,
+        space: c_int,
+        rowlen: *mut c_long,
+        tbcol: *mut c_long,
+        status: *mut c_int,
+    ) -> c_int;
 }
+
+pub const ASCII_TBL: c_int = 1;
+pub const BINARY_TBL: c_int = 2;
 
 fn cstr_to_string(buf: &[u8]) -> String {
     let cstr = CStr::from_bytes_until_nul(buf).unwrap_or(c"unknown error status");
@@ -451,6 +578,26 @@ impl CFile {
         Ok(Self { fptr })
     }
 
+    /// `ffopen`.
+    pub fn open(path: &str, iomode: i32) -> Result<Self, i32> {
+        let _g = lock();
+        let cpath = CString::new(path).map_err(|_| 104)?;
+        let mut fptr: *mut c_void = std::ptr::null_mut();
+        let mut status: c_int = 0;
+        unsafe {
+            ffopen(
+                &raw mut fptr,
+                cpath.as_ptr(),
+                iomode as c_int,
+                &raw mut status,
+            );
+            if status != 0 {
+                return Err(status as i32);
+            }
+        }
+        Ok(Self { fptr })
+    }
+
     fn cstr(s: &str) -> CString {
         CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
     }
@@ -638,6 +785,308 @@ impl CFile {
         status as i32
     }
 
+    /// `ffcrtb`. `tunit` entries of `None` become empty strings.
+    pub fn create_tbl(
+        &mut self,
+        tbltype: i32,
+        nrows: i64,
+        ttype: &[&str],
+        tform: &[&str],
+        tunit: &[Option<&str>],
+        extname: Option<&str>,
+    ) -> i32 {
+        let _g = lock();
+        let tfields = tform.len() as c_int;
+        let mut ttype_c: Vec<CString> = ttype.iter().map(|s| Self::cstr(s)).collect();
+        while ttype_c.len() < tform.len() {
+            ttype_c.push(Self::cstr(""));
+        }
+        let tform_c: Vec<CString> = tform.iter().map(|s| Self::cstr(s)).collect();
+        let tunit_c: Vec<CString> = (0..tform.len())
+            .map(|i| Self::cstr(tunit.get(i).copied().flatten().unwrap_or("")))
+            .collect();
+        let mut ttype_p: Vec<*mut c_char> = ttype_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut tform_p: Vec<*mut c_char> = tform_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut tunit_p: Vec<*mut c_char> = tunit_c.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let ext = extname.map(Self::cstr);
+        let ext_ptr = ext.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let mut status: c_int = 0;
+        unsafe {
+            ffcrtb(
+                self.fptr,
+                tbltype as c_int,
+                nrows as c_longlong,
+                tfields,
+                ttype_p.as_mut_ptr(),
+                tform_p.as_mut_ptr(),
+                tunit_p.as_mut_ptr(),
+                ext_ptr,
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffpcls`.
+    pub fn write_col_str(&mut self, colnum: i32, firstrow: i64, values: &[&str]) -> i32 {
+        let _g = lock();
+        let owned: Vec<CString> = values.iter().map(|s| Self::cstr(s)).collect();
+        let mut ptrs: Vec<*mut c_char> = owned.iter().map(|c| c.as_ptr().cast_mut()).collect();
+        let mut status: c_int = 0;
+        unsafe {
+            ffpcls(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                values.len() as c_longlong,
+                ptrs.as_mut_ptr(),
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffpcljj`.
+    pub fn write_col_i64(&mut self, colnum: i32, firstrow: i64, values: &[i64]) -> i32 {
+        let _g = lock();
+        let mut data: Vec<c_longlong> = values.iter().map(|&v| v as c_longlong).collect();
+        let mut status: c_int = 0;
+        unsafe {
+            ffpcljj(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                values.len() as c_longlong,
+                data.as_mut_ptr(),
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffpcld`.
+    pub fn write_col_f64(&mut self, colnum: i32, firstrow: i64, values: &mut [f64]) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe {
+            ffpcld(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                values.len() as c_longlong,
+                values.as_mut_ptr(),
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffpcle`.
+    pub fn write_col_f32(&mut self, colnum: i32, firstrow: i64, values: &mut [f32]) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe {
+            ffpcle(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                values.len() as c_longlong,
+                values.as_mut_ptr(),
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffgcvs`.
+    pub fn read_col_str(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        nelem: usize,
+    ) -> Result<(Vec<String>, i32), i32> {
+        let _g = lock();
+        let mut bufs: Vec<Vec<u8>> = (0..nelem).map(|_| vec![0u8; FLEN_VALUE]).collect();
+        let mut ptrs: Vec<*mut c_char> = bufs
+            .iter_mut()
+            .map(|b| b.as_mut_ptr().cast::<c_char>())
+            .collect();
+        let mut anynul: c_int = 0;
+        let mut status: c_int = 0;
+        let mut nul = [0u8; 1];
+        unsafe {
+            ffgcvs(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                nelem as c_longlong,
+                nul.as_mut_ptr().cast::<c_char>(),
+                ptrs.as_mut_ptr(),
+                &raw mut anynul,
+                &raw mut status,
+            );
+        }
+        if status != 0 {
+            return Err(status as i32);
+        }
+        let out = bufs.iter().map(|b| cstr_to_string(b)).collect();
+        Ok((out, anynul as i32))
+    }
+
+    /// `ffgcvjj`.
+    pub fn read_col_i64(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        out: &mut [i64],
+    ) -> Result<i32, i32> {
+        let _g = lock();
+        let mut anynul: c_int = 0;
+        let mut status: c_int = 0;
+        unsafe {
+            ffgcvjj(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                out.len() as c_longlong,
+                0,
+                out.as_mut_ptr().cast::<c_longlong>(),
+                &raw mut anynul,
+                &raw mut status,
+            );
+        }
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok(anynul as i32)
+        }
+    }
+
+    /// `ffgcvd`.
+    pub fn read_col_f64(
+        &mut self,
+        colnum: i32,
+        firstrow: i64,
+        out: &mut [f64],
+    ) -> Result<i32, i32> {
+        let _g = lock();
+        let mut anynul: c_int = 0;
+        let mut status: c_int = 0;
+        unsafe {
+            ffgcvd(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                out.len() as c_longlong,
+                0.0,
+                out.as_mut_ptr(),
+                &raw mut anynul,
+                &raw mut status,
+            );
+        }
+        if status != 0 {
+            Err(status as i32)
+        } else {
+            Ok(anynul as i32)
+        }
+    }
+
+    /// `ffirow`.
+    pub fn insert_rows(&mut self, firstrow: i64, nrows: i64) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe {
+            ffirow(
+                self.fptr,
+                firstrow as c_longlong,
+                nrows as c_longlong,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `ffdrow`.
+    pub fn delete_rows(&mut self, firstrow: i64, nrows: i64) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe {
+            ffdrow(
+                self.fptr,
+                firstrow as c_longlong,
+                nrows as c_longlong,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
+    /// `fficol`.
+    pub fn insert_col(&mut self, numcol: i32, ttype: &str, tform: &str) -> i32 {
+        let _g = lock();
+        let mut tn = Self::cstr(ttype).into_bytes_with_nul();
+        let mut tf = Self::cstr(tform).into_bytes_with_nul();
+        let mut status: c_int = 0;
+        unsafe {
+            fficol(
+                self.fptr,
+                numcol as c_int,
+                tn.as_mut_ptr().cast::<c_char>(),
+                tf.as_mut_ptr().cast::<c_char>(),
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffdcol`.
+    pub fn delete_col(&mut self, colnum: i32) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe { ffdcol(self.fptr, colnum as c_int, &raw mut status) };
+        status as i32
+    }
+
+    /// `ffpclu`.
+    pub fn write_col_null(&mut self, colnum: i32, firstrow: i64, nelem: i64) -> i32 {
+        let _g = lock();
+        let mut status: c_int = 0;
+        unsafe {
+            ffpclu(
+                self.fptr,
+                colnum as c_int,
+                firstrow as c_longlong,
+                1,
+                nelem as c_longlong,
+                &raw mut status,
+            );
+        }
+        status as i32
+    }
+
+    /// `ffmahd`.
+    pub fn movabs_hdu(&mut self, hdunum: i32) -> i32 {
+        let _g = lock();
+        let mut hdutype: c_int = 0;
+        let mut status: c_int = 0;
+        unsafe {
+            ffmahd(
+                self.fptr,
+                hdunum as c_int,
+                &raw mut hdutype,
+                &raw mut status,
+            )
+        };
+        status as i32
+    }
+
     /// `ffclos`.
     pub fn close(mut self) -> i32 {
         let _g = lock();
@@ -673,6 +1122,72 @@ pub fn ffd2e_str(value: f64, decim: i32) -> (String, i32) {
         );
     }
     (cstr_to_string(&buf), status as i32)
+}
+
+/// `ffasfm`. Returns `(datacode, width, decimals)`.
+pub fn ffasfm_parse(tform: &str) -> Result<(i32, i64, i32), i32> {
+    let _g = lock();
+    let mut buf = {
+        let mut v = CString::new(tform)
+            .expect("tform contains NUL")
+            .into_bytes_with_nul();
+        v.resize(FLEN_VALUE, 0);
+        v
+    };
+    let mut dtcode: c_int = 0;
+    let mut twidth: c_long = 0;
+    let mut decimals: c_int = 0;
+    let mut status: c_int = 0;
+    unsafe {
+        ffasfm(
+            buf.as_mut_ptr().cast::<c_char>(),
+            &raw mut dtcode,
+            &raw mut twidth,
+            &raw mut decimals,
+            &raw mut status,
+        );
+    }
+    if status != 0 {
+        Err(status as i32)
+    } else {
+        Ok((dtcode as i32, twidth as i64, decimals as i32))
+    }
+}
+
+/// `ffgabc`. Returns `(rowlen, tbcol)`.
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+pub fn ffgabc_vals(tforms: &[&str], space: i32) -> Result<(i64, Vec<i64>), i32> {
+    let _g = lock();
+    let owned: Vec<CString> = tforms
+        .iter()
+        .map(|s| CString::new(*s).expect("tform contains NUL"))
+        .collect();
+    let mut ptrs: Vec<*mut c_char> = owned.iter().map(|c| c.as_ptr().cast_mut()).collect();
+    let mut tbcol = vec![0 as c_long; tforms.len().max(1)];
+    let mut rowlen: c_long = 0;
+    let mut status: c_int = 0;
+    unsafe {
+        ffgabc(
+            tforms.len() as c_int,
+            ptrs.as_mut_ptr(),
+            space as c_int,
+            &raw mut rowlen,
+            tbcol.as_mut_ptr(),
+            &raw mut status,
+        );
+    }
+    if status != 0 {
+        Err(status as i32)
+    } else {
+        Ok((
+            rowlen as i64,
+            tbcol
+                .into_iter()
+                .take(tforms.len())
+                .map(i64::from)
+                .collect(),
+        ))
+    }
 }
 
 /// `ffd2f` text.

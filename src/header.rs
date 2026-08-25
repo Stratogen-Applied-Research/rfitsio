@@ -6,8 +6,11 @@ use crate::card::{
 };
 use crate::error::{FitsError, Result};
 use crate::status::{
-    BAD_BITPIX, BAD_KEYCHAR, BAD_NAXIS, KEY_NO_EXIST, KEY_OUT_BOUNDS, NEG_AXIS, NO_END,
+    BAD_BITPIX, BAD_KEYCHAR, BAD_NAXIS, BAD_TBCOL, BAD_TFIELDS, BAD_TFORM, KEY_NO_EXIST,
+    KEY_OUT_BOUNDS, NEG_AXIS, NEG_ROWS, NEG_WIDTH, NO_END, NO_TBCOL, NO_TFORM, NO_XTENSION,
+    NOT_ATABLE,
 };
+use crate::tform::ascii_column_starts;
 use crate::types::{CARD_LEN, ImageType, RECORD_LEN};
 
 /// CFITSIO `ffphpr` self-documenting COMMENT cards (primary array).
@@ -31,6 +34,21 @@ pub const COMM_BZERO_SBYTE: &str = "offset data range to that of signed byte";
 pub const BZERO_ULONGLONG_CARD: &str =
     "BZERO   =  9223372036854775808 / offset data range to that of unsigned long long";
 
+pub const COMM_XTENSION_TABLE: &str = "ASCII table extension";
+pub const COMM_BITPIX_ASCII: &str = "8-bit ASCII characters";
+pub const COMM_NAXIS_ASCII: &str = "2-dimensional ASCII table";
+pub const COMM_NAXIS1_ASCII: &str = "width of table in characters";
+pub const COMM_NAXIS2_ASCII: &str = "number of rows in table";
+pub const COMM_PCOUNT_ASCII: &str = "no group parameters (required keyword)";
+pub const COMM_GCOUNT_ASCII: &str = "one data group (required keyword)";
+pub const COMM_TFIELDS: &str = "number of fields in each row";
+pub const COMM_TFORM_ASCII: &str = "Fortran-77 format of field";
+pub const COMM_TUNIT: &str = "physical unit of field";
+pub const COMM_EXTNAME_ASCII: &str = "name of this ASCII table extension";
+pub const COMM_TTYPE_INSERTED: &str = "label for field";
+pub const COMM_TFORM_INSERTED: &str = "format of field";
+pub const COMM_TBCOL_INSERTED: &str = "beginning column of field";
+
 /// Result of [`Header::primary_info`] (`ffghpr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimaryInfo {
@@ -48,6 +66,27 @@ pub struct PrimaryInfo {
     pub gcount: i64,
     /// EXTEND (false if absent).
     pub extend: bool,
+}
+
+/// Result of [`Header::ascii_table_info`] (`ffghtb`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsciiTableInfo {
+    /// NAXIS1: characters per row.
+    pub rowlen: i64,
+    /// NAXIS2: number of rows.
+    pub nrows: i64,
+    /// TFIELDS.
+    pub tfields: i32,
+    /// TTYPEn (empty string if absent).
+    pub ttype: Vec<String>,
+    /// TBCOLn (1-based).
+    pub tbcol: Vec<i64>,
+    /// TFORMn.
+    pub tform: Vec<String>,
+    /// TUNITn (empty string if absent).
+    pub tunit: Vec<String>,
+    /// EXTNAME (empty if absent).
+    pub extname: String,
 }
 
 /// Ordered list of header cards, without the END card or fill.
@@ -181,6 +220,179 @@ impl Header {
         h.write_long("GCOUNT", 1, Some(COMM_GCOUNT))?;
         write_unsigned_scaling(&mut h, ty)?;
         Ok(h)
+    }
+
+    /// Required keywords for an ASCII table extension (`ffphtb`).
+    ///
+    /// TBCOL values and NAXIS1 are computed with one blank between columns
+    /// (`ffgabc` with `space = 1`).
+    pub fn ascii_table(
+        nrows: i64,
+        ttype: &[&str],
+        tform: &[&str],
+        tunit: &[Option<&str>],
+        extname: Option<&str>,
+    ) -> Result<Self> {
+        if nrows < 0 {
+            return Err(FitsError::new(NEG_ROWS));
+        }
+        let tfields = tform.len();
+        if tfields > 999 {
+            return Err(FitsError::new(BAD_TFIELDS));
+        }
+        for tf in tform {
+            if tf.len() > 29 {
+                return Err(FitsError::with_message(
+                    BAD_TFORM,
+                    "Error: ASCII table TFORM code is too long (ffphtb)",
+                ));
+            }
+        }
+        let (rowlen, tbcol) = ascii_column_starts(tform, 1)?;
+        if rowlen < 0 {
+            return Err(FitsError::new(NEG_WIDTH));
+        }
+        let mut h = Self::new();
+        h.write_string("XTENSION", "TABLE", Some(COMM_XTENSION_TABLE))?;
+        h.write_long("BITPIX", 8, Some(COMM_BITPIX_ASCII))?;
+        h.write_long("NAXIS", 2, Some(COMM_NAXIS_ASCII))?;
+        h.write_long("NAXIS1", rowlen, Some(COMM_NAXIS1_ASCII))?;
+        h.write_long("NAXIS2", nrows, Some(COMM_NAXIS2_ASCII))?;
+        h.write_long("PCOUNT", 0, Some(COMM_PCOUNT_ASCII))?;
+        h.write_long("GCOUNT", 1, Some(COMM_GCOUNT_ASCII))?;
+        h.write_long("TFIELDS", tfields as i64, Some(COMM_TFIELDS))?;
+        for (ii, tf) in tform.iter().enumerate() {
+            let n = ii + 1;
+            let ttype_s = ttype.get(ii).copied().unwrap_or("");
+            if !ttype_s.is_empty() {
+                let comm = format!("label for field {n:3}");
+                h.write_string(&format!("TTYPE{n}"), ttype_s, Some(&comm))?;
+            }
+            let col = tbcol[ii];
+            if col < 1 || (rowlen > 0 && col > rowlen) {
+                return Err(FitsError::new(BAD_TBCOL));
+            }
+            let comm = format!("beginning column of field {n:3}");
+            h.write_long(&format!("TBCOL{n}"), col, Some(&comm))?;
+            let tfmt = tf.to_ascii_uppercase();
+            h.write_string(&format!("TFORM{n}"), &tfmt, Some(COMM_TFORM_ASCII))?;
+            if let Some(&Some(unit)) = tunit.get(ii) {
+                if !unit.is_empty() {
+                    h.write_string(&format!("TUNIT{n}"), unit, Some(COMM_TUNIT))?;
+                }
+            }
+        }
+        if let Some(name) = extname {
+            if !name.is_empty() {
+                h.write_string("EXTNAME", name, Some(COMM_EXTNAME_ASCII))?;
+            }
+        }
+        Ok(h)
+    }
+
+    /// ASCII-table required keywords (`fits_read_atblhdr` / `ffghtb`).
+    pub fn ascii_table_info(&self) -> Result<AsciiTableInfo> {
+        let first = self
+            .cards
+            .first()
+            .ok_or_else(|| FitsError::new(NO_XTENSION))?;
+        let (fname, _) = first.keyword_name()?;
+        if !fname.eq_ignore_ascii_case("XTENSION") {
+            return Err(FitsError::new(NO_XTENSION));
+        }
+        let (xt, _) = self.get_string("XTENSION")?;
+        if xt.trim() != "TABLE" {
+            return Err(FitsError::new(NOT_ATABLE));
+        }
+        let rowlen = self.get_i64("NAXIS1")?;
+        let nrows = self.get_i64("NAXIS2")?;
+        let tfields_i = self.get_i64("TFIELDS")?;
+        if !(0..=999).contains(&tfields_i) {
+            return Err(FitsError::new(BAD_TFIELDS));
+        }
+        let tfields = tfields_i as i32;
+        let mut ttype = Vec::new();
+        let mut tbcol = Vec::new();
+        let mut tform = Vec::new();
+        let mut tunit = Vec::new();
+        for i in 1..=tfields {
+            ttype.push(
+                self.get_string(&format!("TTYPE{i}"))
+                    .map(|(v, _)| v)
+                    .unwrap_or_default(),
+            );
+            tbcol.push(
+                self.get_i64(&format!("TBCOL{i}"))
+                    .map_err(|_| FitsError::new(NO_TBCOL))?,
+            );
+            tform.push(
+                self.get_string(&format!("TFORM{i}"))
+                    .map(|(v, _)| v)
+                    .map_err(|_| FitsError::new(NO_TFORM))?,
+            );
+            tunit.push(
+                self.get_string(&format!("TUNIT{i}"))
+                    .map(|(v, _)| v)
+                    .unwrap_or_default(),
+            );
+        }
+        let extname = self
+            .get_string("EXTNAME")
+            .map(|(v, _)| v)
+            .unwrap_or_default();
+        Ok(AsciiTableInfo {
+            rowlen,
+            nrows,
+            tfields,
+            ttype,
+            tbcol,
+            tform,
+            tunit,
+            extname,
+        })
+    }
+
+    /// Replace a long keyword, keeping its existing comment (`ffmkyj` with `"&"`).
+    pub fn update_long_keep_comment(&mut self, name: &str, value: i64) -> Result<()> {
+        let comm = match self.raw_value_comment(name) {
+            Ok((_, c)) if !c.is_empty() => Some(c),
+            Ok(_) => None,
+            Err(e) => return Err(e),
+        };
+        let s = make_card_string(name, &value.to_string(), comm.as_deref())?;
+        self.replace_name(name, Card::from_text(&s))
+    }
+
+    /// Shift `Txxxn` keyword indices (`ffkshf`). Starts at the 9th card.
+    ///
+    /// If `incre <= 0`, keywords with index `colmin` are deleted.
+    pub fn shift_table_col_keys(&mut self, colmin: i32, colmax: i32, incre: i32) -> Result<()> {
+        let mut i = 8usize;
+        while i < self.cards.len() {
+            let bytes = *self.cards[i].as_bytes();
+            if bytes[0] != b'T' {
+                i += 1;
+                continue;
+            }
+            let Some((prefix_len, ivalue)) = tkey_index(&bytes) else {
+                i += 1;
+                continue;
+            };
+            if ivalue < colmin || ivalue > colmax {
+                i += 1;
+                continue;
+            }
+            if incre <= 0 && ivalue == colmin {
+                self.cards.remove(i);
+                continue;
+            }
+            let new_idx = ivalue + incre;
+            let prefix = std::str::from_utf8(&bytes[0..prefix_len]).unwrap_or("");
+            let new_name = format!("{prefix}{new_idx}");
+            self.cards[i].set_keyword_name(&new_name);
+            i += 1;
+        }
+        Ok(())
     }
 
     /// First card whose 8-character name matches `name` (case-insensitive).
@@ -646,6 +858,46 @@ fn write_unsigned_scaling(h: &mut Header, ty: ImageType) -> Result<()> {
 
 fn name8(name: &str) -> [u8; 8] {
     name8_bytes(name.as_bytes())
+}
+
+/// Parse a `Txxxn` / `TDIMn` name. Returns `(prefix_len, index)`.
+fn tkey_index(bytes: &[u8; 80]) -> Option<(usize, i32)> {
+    let rec = bytes;
+    let q = &rec[1..5];
+    let i1 = if q == b"BCOL"
+        || q == b"FORM"
+        || q == b"TYPE"
+        || q == b"SCAL"
+        || q == b"UNIT"
+        || q == b"NULL"
+        || q == b"ZERO"
+        || q == b"DISP"
+        || q == b"LMIN"
+        || q == b"LMAX"
+        || q == b"DMIN"
+        || q == b"DMAX"
+        || q == b"CTYP"
+        || q == b"CRPX"
+        || q == b"CRVL"
+        || q == b"CDLT"
+        || q == b"CROT"
+        || q == b"CUNI"
+    {
+        5usize
+    } else if rec.starts_with(b"TDIM") {
+        4usize
+    } else {
+        return None;
+    };
+    let mut suffix = String::new();
+    for &b in rec[i1..8].iter() {
+        if b == b' ' {
+            break;
+        }
+        suffix.push(b as char);
+    }
+    let ivalue = suffix.parse::<i32>().ok()?;
+    Some((i1, ivalue))
 }
 
 fn name8_bytes(bytes: &[u8]) -> [u8; 8] {

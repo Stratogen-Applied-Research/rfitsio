@@ -6,7 +6,7 @@ use crate::error::{FitsError, Result};
 use crate::hdu::Hdu;
 use crate::header::Header;
 use crate::io::{self, DiskDriver, Driver, MemoryDriver};
-use crate::status::{BAD_FILEPTR, FILE_NOT_CREATED, FILE_NOT_OPENED, READONLY_FILE};
+use crate::status::{BAD_FILEPTR, BAD_HDU_NUM, FILE_NOT_CREATED, FILE_NOT_OPENED, READONLY_FILE};
 use crate::types::{HduType, READONLY, READWRITE};
 
 /// Open mode matching CFITSIO `READONLY` / `READWRITE`.
@@ -186,6 +186,22 @@ impl FitsFile {
         Ok(inner.hdus[inner.current].hdu_type)
     }
 
+    /// 1-based current HDU number (`fits_get_hdu_num` / `ffghdn`).
+    pub fn hdunum(&self) -> Result<usize> {
+        Ok(self.inner()?.current + 1)
+    }
+
+    /// Move to 1-based HDU `hdunum` (`fits_movabs_hdu` / `ffmahd`).
+    pub fn movabs_hdu(&mut self, hdunum: usize) -> Result<HduType> {
+        self.flush_inner()?;
+        let inner = self.inner_mut()?;
+        if hdunum < 1 || hdunum > inner.hdus.len() {
+            return Err(FitsError::new(BAD_HDU_NUM));
+        }
+        inner.current = hdunum - 1;
+        Ok(inner.hdus[inner.current].hdu_type)
+    }
+
     /// Current HDU header.
     pub fn header(&self) -> Result<&Header> {
         let inner = self.inner()?;
@@ -279,6 +295,14 @@ fn flush_header_and_maybe_shift(inner: &mut Inner) -> Result<()> {
         0
     };
     inner.io.truncate(new_data_start + tail)?;
+    if inner.hdus[idx].hdu_type == HduType::AsciiTable && tail > data_bytes {
+        io::write_fill(
+            &mut inner.io,
+            new_data_start + data_bytes,
+            tail - data_bytes,
+            b' ',
+        )?;
+    }
     inner.hdus[idx].data_start = new_data_start;
     Ok(())
 }
@@ -323,11 +347,11 @@ fn hdu_type_from_header(header: &Header) -> HduType {
     }
     if let Some(c) = header.card_by_name("XTENSION") {
         let text = c.as_str().unwrap_or("");
-        if text.contains("TABLE") && !text.contains("BINTABLE") {
-            return HduType::AsciiTable;
-        }
         if text.contains("BINTABLE") {
             return HduType::BinaryTable;
+        }
+        if text.contains("TABLE") {
+            return HduType::AsciiTable;
         }
     }
     HduType::Image
