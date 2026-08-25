@@ -1,0 +1,3 @@
+[submodule "vendor/cfitsio"]
+	path = vendor/cfitsio
+	url = https://github.com/HEASARC/cfitsio.git

@@ -1,0 +1,10 @@
+[package]
+name = "cfitsio-sys"
+version = "4.7.0"
+edition = "2024"
+publish = false
+description = "Test-only FFI bindings to vendored CFITSIO 4.7.0 (oracle)"
+links = "cfitsio"
+
+[build-dependencies]
+cmake = "0.1"

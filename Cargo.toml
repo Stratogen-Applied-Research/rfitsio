@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/cfitsio-sys"]
+resolver = "3"
+
+[package]
+name = "rfitsio"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Pure-Rust FITS I/O library, validated against CFITSIO 4.7.0"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+keywords = ["fits", "astronomy", "cfitsio"]
+categories = ["science", "parser-implementations"]
+exclude = ["vendor", "crates/cfitsio-sys"]
+
+[lib]
+name = "rfitsio"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+cfitsio-sys = { path = "crates/cfitsio-sys" }
+
+[lints.rust]
+unsafe_code = "forbid"
