@@ -10,16 +10,16 @@ use crate::status::DATA_DECOMPRESSION_ERR;
 /// Default Rice block size written as `ZVAL1`.
 pub const DEFAULT_BLOCKSIZE: i32 = 32;
 
-const NONZERO_COUNT: [i32; 256] = [
-    0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-];
+/// Bit width of a byte (`floor(log2(i))+1` for `i > 0`). CFITSIO `nonzero_count`.
+const NONZERO_COUNT: [i32; 256] = {
+    let mut t = [0i32; 256];
+    let mut i = 1u32;
+    while i < 256 {
+        t[i as usize] = 32 - i.leading_zeros() as i32;
+        i += 1;
+    }
+    t
+};
 
 const MASK: [u32; 33] = [
     0,
@@ -56,6 +56,16 @@ const MASK: [u32; 33] = [
     0x7fff_ffff,
     0xffff_ffff,
 ];
+
+fn mask_nbits(nbits: i32) -> u32 {
+    if (0..=32).contains(&nbits) {
+        MASK[nbits as usize]
+    } else if nbits > 32 {
+        u32::MAX
+    } else {
+        0
+    }
+}
 
 fn fs_params(bytepix: i32) -> Result<(i32, i32)> {
     match bytepix {
@@ -267,7 +277,7 @@ pub fn decompress(c: &[u8], nx: usize, bytepix: i32, nblock: i32) -> Result<Vec<
             nbits += 8;
         }
         let fs = (b >> nbits) as i32 - 1;
-        b &= (1u32 << nbits) - 1;
+        b &= mask_nbits(nbits);
         let imax = (i + nblock).min(nx);
         if fs < 0 {
             let v = sign_extend(lastpix, bytepix);
@@ -296,7 +306,7 @@ pub fn decompress(c: &[u8], nx: usize, bytepix: i32, nblock: i32) -> Result<Vec<
                     b = u32::from(c[pos]);
                     pos += 1;
                     diff |= b >> (-k);
-                    b &= (1u32 << nbits) - 1;
+                    b &= mask_nbits(nbits);
                 } else {
                     b = 0;
                 }
@@ -314,8 +324,15 @@ pub fn decompress(c: &[u8], nx: usize, bytepix: i32, nblock: i32) -> Result<Vec<
                     b = u32::from(c[pos]);
                     pos += 1;
                 }
-                let nzero = nbits - NONZERO_COUNT[b as usize];
+                let idx = b as usize;
+                if idx >= NONZERO_COUNT.len() {
+                    return Err(FitsError::new(DATA_DECOMPRESSION_ERR));
+                }
+                let nzero = nbits - NONZERO_COUNT[idx];
                 nbits -= nzero + 1;
+                if !(0..32).contains(&nbits) {
+                    return Err(FitsError::new(DATA_DECOMPRESSION_ERR));
+                }
                 b ^= 1u32 << nbits;
                 nbits -= fs;
                 while nbits < 0 {
@@ -327,7 +344,7 @@ pub fn decompress(c: &[u8], nx: usize, bytepix: i32, nblock: i32) -> Result<Vec<
                     nbits += 8;
                 }
                 let diff = ((nzero as u32) << fs) | (b >> nbits);
-                b &= (1u32 << nbits) - 1;
+                b &= mask_nbits(nbits);
                 lastpix = trunc_pix(unmap_add(diff, lastpix), bytepix);
                 out[i] = sign_extend(lastpix, bytepix);
                 i += 1;
@@ -384,5 +401,35 @@ mod tests {
     fn rice_high_entropy() {
         let data: Vec<i32> = (0..64).map(|i| (i * 7919) % 100_000 - 50_000).collect();
         roundtrip(&data, 4);
+    }
+
+    #[test]
+    fn nonzero_count_is_byte_bit_width() {
+        assert_eq!(NONZERO_COUNT[0], 0);
+        assert_eq!(NONZERO_COUNT[126], 7);
+        assert_eq!(NONZERO_COUNT[127], 7);
+        assert_eq!(NONZERO_COUNT[128], 8);
+        for i in 1..256u32 {
+            assert_eq!(NONZERO_COUNT[i as usize], 32 - i.leading_zeros() as i32);
+        }
+    }
+
+    #[test]
+    fn rice_row_wrap_jumps_u16() {
+        // Row-wrap jumps encode as long unary; stop bits can land on 0x7e/0x7f.
+        for nx in [32usize, 64, 128, 256] {
+            for ny in [1usize, 4, 16, 64] {
+                let data: Vec<i32> = (0..ny)
+                    .flat_map(|y| (0..nx).map(move |x| 93 + ((x * 17 + y * 31) % 4003) as i32))
+                    .collect();
+                roundtrip(&data, 2);
+            }
+        }
+        let mut jumps = vec![100i32; 256];
+        jumps[31] = 4000;
+        jumps[32] = 93;
+        jumps[63] = 4095;
+        jumps[64] = 100;
+        roundtrip(&jumps, 2);
     }
 }

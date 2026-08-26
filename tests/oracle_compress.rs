@@ -351,3 +351,51 @@ fn quantized_float_cfitsio_write_rfitsio_read() {
         assert!((a - b).abs() < 1e-3, "{a} vs {b}");
     }
 }
+
+fn spectrogram_i16(nx: usize, ny: usize) -> Vec<i16> {
+    (0..ny)
+        .flat_map(|y| (0..nx).map(move |x| 93 + ((x * 17 + y * 31) % 4003) as i16))
+        .collect()
+}
+
+#[test]
+fn rice_i16_tile_heights_cross() {
+    let dir = tempfile::tempdir().unwrap();
+    let nx = 512i64;
+    let ny = 64i64;
+    let data = spectrogram_i16(nx as usize, ny as usize);
+
+    for rows in [1i64, 4, 16, 64] {
+        let tiles = [nx, rows];
+        let cpath = dir.path().join(format!("c_r{rows}.fits"));
+        let mut f = cfitsio_sys::CFile::create_empty(cpath.to_str().unwrap()).unwrap();
+        assert_eq!(f.set_compression_type(RICE_1), 0);
+        assert_eq!(f.set_tile_dim(&tiles), 0);
+        assert_eq!(f.create_img(SHORT_IMG, &[nx, ny]), 0);
+        assert_eq!(f.write_img(TSHORT, 1, &data), 0);
+        assert_eq!(f.close(), 0);
+        assert_eq!(
+            rfitsio_read_i16(&cpath, data.len()),
+            data,
+            "cfitsio write / rfitsio read rows={rows}"
+        );
+
+        let rpath = dir.path().join(format!("r_r{rows}.fits"));
+        let mut wf = FitsFile::create(&rpath).unwrap();
+        wf.set_compression_type(RICE_1).unwrap();
+        wf.set_tile_dim(&tiles).unwrap();
+        wf.create_image(ImageType::I16, &[nx, ny]).unwrap();
+        wf.write_image(1, &data).unwrap();
+        wf.close().unwrap();
+        assert_eq!(
+            cfitsio_read_i16(&rpath, data.len()),
+            data,
+            "rfitsio write / cfitsio read rows={rows}"
+        );
+        assert_eq!(
+            rfitsio_read_i16(&rpath, data.len()),
+            data,
+            "self roundtrip rows={rows}"
+        );
+    }
+}
